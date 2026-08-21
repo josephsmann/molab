@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 __marimo__/
 .DS_Store
+
+# Agent skills installed via `npx skills add` — vendored third-party files
+# and symlinks into them. skills-lock.json is tracked so they can be
+# reinstalled reproducibly.
+.agents/
+.claude/skills/

@@ -12,6 +12,29 @@ change up automatically.
 |---|---|
 | [`hello.py`](notebooks/hello.py) — round-trip smoke test | [![Open in molab](https://marimo.io/molab-shield.svg)](https://molab.marimo.io/github/josephsmann/molab/blob/main/notebooks/hello.py) [(wasm preview)](https://molab.marimo.io/github/josephsmann/molab/blob/main/notebooks/hello.py/wasm) |
 
+## Pairing with agents
+
+Agents (Claude Code, Codex, OpenCode) can drive a *running* notebook — inspect
+live variables, test code in the kernel scratchpad, add and run cells — via
+[`marimo pair`](https://docs.marimo.io/guides/generate_with_ai/marimo_pair/).
+
+```sh
+npx skills add marimo-team/marimo-pair   # installs the skill (tracked in skills-lock.json)
+```
+
+Then either pair on a local notebook:
+
+```sh
+uvx marimo@latest edit --sandbox notebooks/hello.py --no-token
+```
+
+...or on a molab sandbox: start the notebook, choose **Pair with an agent**
+from the actions panel, and hand the agent the kernel URL and token it shows.
+
+While a session is live the **kernel is the source of truth** — edit cells
+through the agent, not by writing to the `.py` file, or the kernel will
+overwrite your changes on save.
+
 ## Conventions
 
 - Every notebook declares its dependencies **inline** (PEP 723 `# /// script`
