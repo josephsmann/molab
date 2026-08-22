@@ -1304,7 +1304,10 @@ def _(
         lines += [""] + givens + [""]
         if coords:
             lines += ["coords = {"] + coords + ["}", ""]
-        lines.append("with pm.Model(" + ("coords=coords" if coords else "") + ") as model:")
+        # `_model`, not `model`: an underscore keeps the name cell-local, so the
+        # scaffold can be pasted straight back into a marimo notebook.
+        lines.append("with pm.Model(" + ("coords=coords" if coords else "")
+                     + ") as _model:")
         lines += body or ["    pass"]
         return "\n".join(lines)
 
@@ -1635,6 +1638,7 @@ def _(
             hier = to_pymc(parse(EXAMPLES["Hierarchical regression"]))
             assert "a[:, None]" in hier          # outer plate broadcast into inner
             assert "observed=y_data" in hier
+            assert "as _model:" in hier   # cell-local when pasted into marimo
 
         @check("generated Stan has the blocks, loops and warnings it needs")
         def _():
