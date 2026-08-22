@@ -33,8 +33,9 @@ def _(mo):
     shaped like the generative model rather than like a picture: `for`
     loops become plates, `~` statements become nodes, and edges fall out of
     which declared names appear on a right-hand side. The diagram redraws
-    as you type, and the same model exports to TikZ, daft, Graphviz DOT and
-    Mermaid.
+    as you type, the same model exports to TikZ, daft, Graphviz DOT and
+    Mermaid, and it will write you a **PyMC** or **Stan** scaffold to start
+    fitting from.
 
     **Hover any node** to see exactly how it relates to its parents: the
     statement as you wrote it, the parents it depends on, the plates it
@@ -116,7 +117,7 @@ def _(direction, mo, parse, source, to_svg, zoom):
 
 
 @app.cell
-def _(mo, model, svg, to_daft, to_dot, to_mermaid, to_tikz):
+def _(mo, model, svg, to_daft, to_dot, to_mermaid, to_pymc, to_stan, to_tikz):
     def _tab(text, language, filename, mimetype="text/plain"):
         return mo.vstack([
             mo.download(
@@ -132,6 +133,8 @@ def _(mo, model, svg, to_daft, to_dot, to_mermaid, to_tikz):
         "TikZ": _tab(to_tikz(model), "latex", "model.tex"),
         "daft": _tab(to_daft(model), "python", "model_daft.py"),
         "Graphviz": _tab(to_dot(model), "dot", "model.dot"),
+        "PyMC": _tab(to_pymc(model), "python", "model_pymc.py"),
+        "Stan": _tab(to_stan(model), "stan", "model.stan"),
         "Mermaid": mo.vstack([
             mo.mermaid(to_mermaid(model)),
             _tab(to_mermaid(model), "text", "model.mmd"),
@@ -171,7 +174,9 @@ def _(mo):
        a foreign plate or node. (The self-checks below assert exactly that,
        for every example, in both directions.)
     5. **Render** — SVG by string concatenation, and the same layout feeds
-       the TikZ, daft, DOT and Mermaid exporters.
+       the TikZ, daft, DOT and Mermaid exporters. The PyMC and Stan
+       generators work from the parse instead: the plate tree becomes
+       `dims` in one and `for` loops in the other.
 
     The hover behaviour is CSS, not JavaScript: every node, edge and
     tooltip gets an id, and one generated `svg:has(#node:hover) …` rule per
@@ -361,7 +366,7 @@ def _(FIXED_WORDS, Model, Node, OBS_WORDS, Plate, re):
                     model.edges.append((name, child))
         return model
 
-    return (parse,)
+    return IDENT_RE, parse
 
 
 @app.cell
@@ -1100,6 +1105,361 @@ def _(layout, node_label, tex_label):
 
 
 @app.cell
+def _(rank_nodes, re):
+    PYMC_DATA = "_data"     # suffix for the arrays an observed node is fitted to
+
+
+    # Distributions whose draw is itself a vector: the plates cannot tell you
+    # how long that vector is, so the generated dims are one short.
+    MULTIVARIATE = {"dirichlet", "mvnormal", "multivariatenormal", "multinomial"}
+
+
+    DISCRETE = {"categorical", "bernoulli", "binomial", "poisson", "multinomial",
+                "geometric", "negbinomial", "negativebinomial", "betabinomial"}
+
+
+    # DSL distribution -> (Stan name, arguments prepended, Stan type of a draw)
+    STAN_DIST = {
+        "normal": ("normal", "", "real"),
+        "halfnormal": ("normal", "0, ", "real<lower=0>"),
+        "cauchy": ("cauchy", "", "real"),
+        "halfcauchy": ("cauchy", "0, ", "real<lower=0>"),
+        "studentt": ("student_t", "", "real"),
+        "uniform": ("uniform", "", "real"),
+        "lognormal": ("lognormal", "", "real<lower=0>"),
+        "exponential": ("exponential", "", "real<lower=0>"),
+        "gamma": ("gamma", "", "real<lower=0>"),
+        "invgamma": ("inv_gamma", "", "real<lower=0>"),
+        "beta": ("beta", "", "real<lower=0, upper=1>"),
+        "dirichlet": ("dirichlet", "", "simplex"),
+        "categorical": ("categorical", "", "int<lower=1>"),
+        "bernoulli": ("bernoulli", "", "int<lower=0, upper=1>"),
+        "binomial": ("binomial", "", "int<lower=0>"),
+        "poisson": ("poisson", "", "int<lower=0>"),
+        "multinomial": ("multinomial", "", "int<lower=0>"),
+        "mvnormal": ("multi_normal", "", "vector"),
+    }
+
+
+    def split_call(text):
+        """`Normal(0, 1)` -> ("Normal", "0, 1"); anything else -> (text, None)."""
+        match = re.match(r"^\s*([A-Za-z_]\w*)\s*\((.*)\)\s*$", text, re.S)
+        return (match.group(1), match.group(2)) if match else (text.strip(), None)
+
+
+    def dims_of(model, node):
+        return tuple(model.plates[p].var for p in node.plates)
+
+
+    def plate_size(plate):
+        """The Stan/PyMC name for how far a plate runs."""
+        tail = plate.span.split("..")[-1].strip()
+        return tail if re.fullmatch(r"[A-Za-z_]\w*", tail) else f"n_{plate.var}"
+
+
+    def in_dependency_order(model):
+        """Nodes in dependency order — parents before children."""
+        rank = rank_nodes(model)
+        return sorted(model.nodes.values(), key=lambda n: (rank[n.name], n.order))
+
+
+    def plate_tree(model, pid, keep):
+        """(order, kind, payload) items directly inside a plate, in source order."""
+        items = [(n.order, "node", n) for n in model.nodes.values()
+                 if (n.plates[-1] if n.plates else None) == pid and keep(n)]
+        for cid, plate in model.plates.items():
+            if plate.parent != pid:
+                continue
+            inside = [n.order for n in model.nodes.values() if cid in n.plates and keep(n)]
+            if inside:
+                items.append((min(inside), "plate", cid))
+        return [item[1:] for item in sorted(items)]
+
+    return (
+        DISCRETE,
+        MULTIVARIATE,
+        PYMC_DATA,
+        STAN_DIST,
+        dims_of,
+        in_dependency_order,
+        plate_size,
+        plate_tree,
+        split_call,
+    )
+
+
+@app.cell
+def _(
+    IDENT_RE,
+    MULTIVARIATE,
+    PYMC_DATA,
+    dims_of,
+    in_dependency_order,
+    plate_size,
+    re,
+    split_call,
+):
+    def pymc_ref(model, target, name, index):
+        """How `name` (optionally indexed) should be written inside `target`."""
+        node = model.nodes[name]
+        if index:
+            picks = [n for n in IDENT_RE.findall(index) if n in model.nodes]
+            if picks:      # mixture-style indexing: phi[z[d,n]] -> phi[z]
+                inner = ", ".join(pymc_ref(model, target, p, None) for p in picks)
+                return f"{name}[{inner}]"
+        mine, theirs = target.plates, node.plates
+        if not theirs or theirs == mine:
+            return name
+        if mine[: len(theirs)] == theirs:      # outer plate: broadcast into place
+            pad = ", ".join(["None"] * (len(mine) - len(theirs)))
+            return f"{name}[:, {pad}]"
+        return f"{name}[{model.plates[theirs[-1]].var}_idx]"
+
+
+    def pymc_expr(model, target, text):
+        """Rewrite a right-hand side into vectorised PyMC."""
+        out, i = [], 0
+        while i < len(text):
+            match = re.match(r"[A-Za-z_]\w*", text[i:])
+            if not match:
+                out.append(text[i])
+                i += 1
+                continue
+            name = match.group(0)
+            i += len(name)
+            index = None
+            if i < len(text) and text[i] == "[":
+                depth, j = 0, i
+                while j < len(text):
+                    depth += 1 if text[j] == "[" else -1 if text[j] == "]" else 0
+                    if depth == 0:
+                        break
+                    j += 1
+                index, i = text[i + 1: j], j + 1
+            if name in model.nodes:
+                out.append(pymc_ref(model, target, name, index))
+            else:
+                out.append(name + (f"[{index}]" if index is not None else ""))
+        return "".join(out)
+
+
+    def pymc_dims(dims):
+        if not dims:
+            return ""
+        if len(dims) == 1:
+            return f', dims="{dims[0]}"'
+        return ", dims=(" + ", ".join(f'"{d}"' for d in dims) + ")"
+
+
+    def to_pymc(model):
+        """A PyMC model scaffold: exact structure, placeholders for the data."""
+        if not model.nodes:
+            return "# nothing to build yet"
+
+        todo, body = [], []
+        for node in in_dependency_order(model):
+            dims = pymc_dims(dims_of(model, node))
+            if node.kind == "fixed":
+                continue
+            if node.kind == "det":
+                expr = pymc_expr(model, node, node.dist or "...")
+                body.append(f'    {node.name} = pm.Deterministic("{node.name}", {expr}{dims})')
+                continue
+            head, args = split_call(node.dist or "Flat()")
+            args = pymc_expr(model, node, args) if args else ""
+            seen = f'"{node.name}"' + (f", {args}" if args else "")
+            if node.kind == "obs":
+                seen += f", observed={node.name}{PYMC_DATA}"
+            note = ("   # TODO: add its support dim, e.g. "
+                    f'dims=({", ".join(chr(34) + d + chr(34) for d in dims_of(model, node))}'
+                    f'{", " if dims_of(model, node) else ""}"category")'
+                    if head.lower() in MULTIVARIATE else "")
+            body.append(f"    {node.name} = pm.{head}({seen}{dims}){note}")
+            if not args:
+                todo.append(f"{node.name} has no distribution — pm.Flat() stands in")
+
+        for index in dict.fromkeys(re.findall(r"\b(\w+)_idx\b", "\n".join(body))):
+            todo.append(f"{index}_idx — an integer array saying which {index} each "
+                        "row belongs to")
+
+        coords = [f'    "{model.plates[p].var}": range({plate_size(model.plates[p])}),'
+                  f"   # {model.plates[p].var} = {model.plates[p].span}"
+                  for p in model.plates]
+        def shape(node):
+            dims = dims_of(model, node)
+            return f", over {' x '.join(dims)}" if dims else ""
+
+        givens = [f"{plate_size(p)} = ...  # how far {p.var} runs ({p.span})"
+                  for p in model.plates.values()]
+        givens += [f"{n.name} = ...  # given{shape(n)}"
+                   for n in model.nodes.values() if n.kind == "fixed"]
+        givens += [f"{n.name}{PYMC_DATA} = ...  # observed{shape(n)}"
+                   for n in model.nodes.values() if n.kind == "obs"]
+        givens = list(dict.fromkeys(givens))
+
+        lines = ["import pymc as pm", "",
+                 "# Generated from a plate model — the structure is exact; every `...`",
+                 "# is data or a size the diagram never knew about."]
+        lines += [f"# TODO: {note}" for note in todo]
+        lines += [""] + givens + [""]
+        if coords:
+            lines += ["coords = {"] + coords + ["}", ""]
+        lines.append("with pm.Model(" + ("coords=coords" if coords else "") + ") as model:")
+        lines += body or ["    pass"]
+        return "\n".join(lines)
+
+    return (to_pymc,)
+
+
+@app.cell
+def _(
+    DISCRETE,
+    IDENT_RE,
+    STAN_DIST,
+    dims_of,
+    plate_size,
+    plate_tree,
+    re,
+    split_call,
+):
+    def stan_ref(model, name, index):
+        """Index a reference the way the plates say it should be indexed."""
+        node = model.nodes[name]
+        if index and any(n in model.nodes for n in IDENT_RE.findall(index)):
+            return f"{name}[{stan_expr(model, index)}]"     # e.g. phi[z[d, n]]
+        dims = dims_of(model, node)
+        return f"{name}[{', '.join(dims)}]" if dims else name
+
+
+    def stan_expr(model, text):
+        """Rewrite a right-hand side so every reference carries its plate indices."""
+        out, i = [], 0
+        while i < len(text):
+            match = re.match(r"[A-Za-z_]\w*", text[i:])
+            if not match:
+                out.append(text[i])
+                i += 1
+                continue
+            name = match.group(0)
+            i += len(name)
+            index = None
+            if i < len(text) and text[i] == "[":
+                depth, j = 0, i
+                while j < len(text):
+                    depth += 1 if text[j] == "[" else -1 if text[j] == "]" else 0
+                    if depth == 0:
+                        break
+                    j += 1
+                index, i = text[i + 1: j], j + 1
+            if name in model.nodes:
+                out.append(stan_ref(model, name, index))
+            else:
+                out.append(name + (f"[{index}]" if index is not None else ""))
+        return "".join(out)
+
+
+    def stan_dist(model, node):
+        """(call, type) for a node's distribution, falling back to a lower-cased guess."""
+        head, args = split_call(node.dist or "")
+        key = head.lower().replace("_", "")
+        name, prefix, kind = STAN_DIST.get(key, (head.lower(), "", "real"))
+        if args is None:
+            return "", kind
+        return f"{name}({prefix}{stan_expr(model, args)})", kind
+
+
+    def stan_decl(model, node, kind=None):
+        """`array[D, N] int<lower=1> w;` — a declaration with the plate shape."""
+        kind = kind or stan_dist(model, node)[1]
+        if kind == "simplex":
+            kind = f"simplex[dim_{node.name}]"
+        elif kind == "vector":
+            kind = f"vector[dim_{node.name}]"
+        shape = ", ".join(plate_size(model.plates[p]) for p in node.plates)
+        return f"array[{shape}] {kind} {node.name};" if shape else f"{kind} {node.name};"
+
+
+    def fixed_type(model, node):
+        """A given feeding a simplex- or vector-valued draw is itself a vector."""
+        for child in model.children(node.name):
+            kind = stan_dist(model, model.nodes[child])[1]
+            if kind in ("simplex", "vector"):
+                return f"vector[dim_{child}]"
+        return "real"
+
+
+    def stan_body(model, keep, pid=None, indent="  "):
+        """The sampling statements, wrapped in the loops the plates describe."""
+        lines = []
+        for kind, payload in plate_tree(model, pid, keep):
+            if kind == "plate":
+                plate = model.plates[payload]
+                lines.append(f"{indent}for ({plate.var} in 1:{plate_size(plate)}) {{")
+                lines += stan_body(model, keep, payload, indent + "  ")
+                lines.append(f"{indent}}}")
+                continue
+            node = payload
+            dims = dims_of(model, node)
+            head = f"{node.name}[{', '.join(dims)}]" if dims else node.name
+            if node.kind == "det":
+                lines.append(f"{indent}{head} = {stan_expr(model, node.dist)};")
+                continue
+            call, _kind = stan_dist(model, node)
+            flag = "   // discrete latent — marginalise this out" if (
+                node.kind == "latent" and split_call(node.dist or "")[0].lower() in DISCRETE
+            ) else ""
+            lines.append(f"{indent}{head} ~ {call};{flag}" if call
+                         else f"{indent}// {head}: no distribution given")
+        return lines
+
+
+    def to_stan(model):
+        """A Stan program: the plates become loops, so the structure is faithful."""
+        if not model.nodes:
+            return "// nothing to build yet"
+
+        discrete = [n for n in model.nodes.values() if n.kind == "latent"
+                    and split_call(n.dist or "")[0].lower() in DISCRETE]
+        notes = ["// Generated from a plate model — sizes and data are yours to fill in,",
+                 "// and array shapes assume rectangular plates."]
+        if discrete:
+            notes.append("// Stan has no discrete parameters: marginalise "
+                         + ", ".join(n.name for n in discrete)
+                         + " out (see the mixture chapter of the user's guide)")
+
+        data = [f"  int<lower=1> {plate_size(p)};" for p in model.plates.values()]
+        data += [f"  int<lower=1> dim_{n.name};   // size of the simplex {n.name} lives on"
+                 for n in model.nodes.values() if stan_dist(model, n)[1] == "simplex"]
+        data += [f"  {stan_decl(model, n, fixed_type(model, n))}   // fixed"
+                 for n in model.nodes.values() if n.kind == "fixed"]
+        data += [f"  {stan_decl(model, n)}   // observed"
+                 for n in model.nodes.values() if n.kind == "obs"]
+
+        params, latent = [], [n for n in model.nodes.values() if n.kind == "latent"]
+        for node in latent:
+            line = f"  {stan_decl(model, node)}"
+            params.append(f"  // {line.strip()}   // discrete — marginalise"
+                          if node in discrete else line)
+
+        blocks = ["\n".join(notes), ""]
+        blocks.append("data {\n" + "\n".join(dict.fromkeys(data)) + "\n}")
+        if params:
+            blocks.append("parameters {\n" + "\n".join(params) + "\n}")
+        dets = [n for n in model.nodes.values() if n.kind == "det"]
+        if dets:
+            blocks.append("transformed parameters {\n"
+                          + "\n".join(f"  {stan_decl(model, n, 'real')}" for n in dets)
+                          + "\n" + "\n".join(stan_body(model, lambda n: n.kind == "det"))
+                          + "\n}")
+        blocks.append("model {\n"
+                      + "\n".join(stan_body(model, lambda n: n.kind in ("latent", "obs")))
+                      + "\n}")
+        return "\n".join(blocks)
+
+    return (to_stan,)
+
+
+@app.cell
 def _():
     EXAMPLES = {
         "Latent Dirichlet allocation": """\
@@ -1117,8 +1477,8 @@ def _():
     """,
         "Gaussian mixture": """\
     # Finite Gaussian mixture
-    const K
-    pi ~ Dirichlet(K)
+    const alpha
+    pi ~ Dirichlet(alpha)
 
     for k in 1..K:
         mu[k] ~ Normal(0, 10)
@@ -1180,6 +1540,8 @@ def _(
     to_daft,
     to_dot,
     to_mermaid,
+    to_pymc,
+    to_stan,
     to_svg,
     to_tikz,
 ):
@@ -1249,7 +1611,8 @@ def _(
         def _():
             for text in EXAMPLES.values():
                 model = parse(text)
-                for export in (to_svg, to_dot, to_tikz, to_daft, to_mermaid):
+                for export in (to_svg, to_dot, to_tikz, to_daft, to_mermaid,
+                               to_pymc, to_stan):
                     if model.nodes or export is to_svg:
                         assert export(model).strip()
 
@@ -1263,6 +1626,27 @@ def _(
             for name in lda.nodes:
                 assert f"-n-{name}:hover)" in svg
             assert "Categorical(phi[z[d,n]])" in svg   # the statement, verbatim
+
+        @check("generated PyMC is valid Python, and indexes the way it should")
+        def _():
+            for text in EXAMPLES.values():
+                compile(to_pymc(parse(text)), "<pymc>", "exec")
+            assert 'pm.Categorical("w", phi[z]' in to_pymc(lda)   # mixture indexing
+            hier = to_pymc(parse(EXAMPLES["Hierarchical regression"]))
+            assert "a[:, None]" in hier          # outer plate broadcast into inner
+            assert "observed=y_data" in hier
+
+        @check("generated Stan has the blocks, loops and warnings it needs")
+        def _():
+            stan = to_stan(lda)
+            for block in ("data {", "parameters {", "model {"):
+                assert block in stan
+            assert stan.count("{") == stan.count("}")
+            assert "for (d in 1:D) {" in stan and "for (n in 1:N_d) {" in stan
+            assert "marginalise z out" in stan   # Stan has no discrete parameters
+            hier = to_stan(parse(EXAMPLES["Hierarchical regression"]))
+            assert "yhat[j, i] = a[j] + b * x[j, i];" in hier   # indexed by plate
+            assert "array[J, n_j] real y;" in hier
 
         @check("junk lines warn instead of raising")
         def _():
@@ -1317,6 +1701,30 @@ def _(mo):
     is, and you inherit whatever the layout engine feels like doing with
     clusters.
 
+    ## The code tabs, and what they can't know
+
+    The **PyMC** and **Stan** tabs are scaffolds, not a compiler. The
+    structure — who depends on whom, what repeats over what, which nodes
+    are data — is exactly what you drew, and the distribution arguments are
+    passed through as you typed them. What a plate diagram never contains
+    is filled with `...` and flagged:
+
+    - **sizes and data.** How far a plate runs, and the arrays an observed
+      node is fitted to.
+    - **the support of a multivariate node.** A Dirichlet inside a plate
+      has a length the diagram never mentions, so the generated `dims` are
+      one short — the line says so.
+    - **discrete latent variables.** Stan cannot sample them at all; the
+      `z` in a mixture has to be marginalised out, and the program says
+      which variables need it rather than quietly emitting something that
+      won't fit.
+    - **ragged plates.** `n = 1..N_d` becomes a rectangular array.
+
+    Where the plates *do* settle the answer, they are used: Stan indexes by
+    the plate path rather than by whatever subscript you typed, and PyMC
+    gets `dims` from the plates, `a[:, None]` when an outer-plate variable
+    feeds an inner one, and `phi[z]` for mixture-style indexing.
+
     ## What marimo brings
 
     marimo has no plate-model widget — its diagram support is `mo.mermaid`
@@ -1330,8 +1738,8 @@ def _(mo):
 
     - drag-to-position on top of the automatic layout (anywidget), with the
       nudges saved back into the text;
-    - reading the DSL straight into PyMC/NumPyro, so the diagram and the
-      sampler cannot drift apart;
+    - going the other way: reading a *live* PyMC model back into the DSL,
+      so the diagram cannot drift from the sampler;
     - `mo.ui.altair_chart`-style selection: click a node, see its Markov
       blanket highlighted.
     """)
