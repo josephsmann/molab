@@ -11,6 +11,7 @@ change up automatically.
 | Notebook | Run |
 |---|---|
 | [`hello.py`](notebooks/hello.py) — round-trip smoke test | [![Open in molab](https://marimo.io/molab-shield.svg)](https://molab.marimo.io/github/josephsmann/molab/blob/main/notebooks/hello.py) [(wasm preview)](https://molab.marimo.io/github/josephsmann/molab/blob/main/notebooks/hello.py/wasm) |
+| [`plate_model.py`](notebooks/plate_model.py) — write a plate model as text, get the diagram (and TikZ/daft/DOT/Mermaid) | [![Open in molab](https://marimo.io/molab-shield.svg)](https://molab.marimo.io/github/josephsmann/molab/blob/main/notebooks/plate_model.py) [(wasm preview)](https://molab.marimo.io/github/josephsmann/molab/blob/main/notebooks/plate_model.py/wasm) |
 
 ## Pairing with agents
 
