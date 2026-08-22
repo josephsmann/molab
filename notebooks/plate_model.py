@@ -36,6 +36,10 @@ def _(mo):
     as you type, and the same model exports to TikZ, daft, Graphviz DOT and
     Mermaid.
 
+    **Hover any node** to see exactly how it relates to its parents: the
+    statement as you wrote it, the parents it depends on, the plates it
+    sits in — with those parents and the arrows into it lit up.
+
     Everything here is pure Python with no third-party dependency, so it
     renders in the WASM preview as happily as in a sandbox.
     """)
@@ -168,6 +172,13 @@ def _(mo):
        for every example, in both directions.)
     5. **Render** — SVG by string concatenation, and the same layout feeds
        the TikZ, daft, DOT and Mermaid exporters.
+
+    The hover behaviour is CSS, not JavaScript: every node, edge and
+    tooltip gets an id, and one generated `svg:has(#node:hover) …` rule per
+    node lights up that node's parents, its incoming arrows and its card.
+    Cards are placed on whichever side of the node hides the least. It
+    costs nothing at runtime and survives the download — open the exported
+    `model.svg` in a browser and the hovering still works.
     """)
     return
 
@@ -719,7 +730,7 @@ def _(
 
 
 @app.cell
-def _(NODE_R, layout, node_label, split_name):
+def _(NODE_R, node_label):
     SERIF = "Georgia, 'Times New Roman', 'DejaVu Serif', serif"
 
 
@@ -727,6 +738,18 @@ def _(NODE_R, layout, node_label, split_name):
 
 
     SHADE = "#c8ced7"
+
+
+    HOVER = "#b23b2e"
+
+
+    MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+
+
+    TIP_SIZE = 12.0
+
+
+    TIP_LEAD = 16.0
 
 
     def xml_escape(text):
@@ -762,14 +785,132 @@ def _(NODE_R, layout, node_label, split_name):
         points[-1] = step(points[-1], points[-2], r2)
         return points
 
+    return (
+        HOVER,
+        INK,
+        MONO,
+        SERIF,
+        SHADE,
+        TIP_LEAD,
+        TIP_SIZE,
+        svg_label,
+        trim_ends,
+        xml_escape,
+    )
+
+
+@app.cell
+def _(
+    HOVER,
+    INK,
+    MONO,
+    NODE_R,
+    SERIF,
+    SHADE,
+    TIP_LEAD,
+    TIP_SIZE,
+    layout,
+    split_name,
+    svg_label,
+    trim_ends,
+    xml_escape,
+):
+    def uid_for(model):
+        """A stable id prefix, so several diagrams can share a page."""
+        text = "|".join(sorted(model.nodes)) + "||" + "|".join(f"{s}>{d}" for s, d in model.edges)
+        digest = 2166136261
+        for ch in text:
+            digest = ((digest ^ ord(ch)) * 16777619) & 0xFFFFFFFF
+        return f"pm{digest:08x}"
+
+
+    def relation_lines(model, node):
+        """What hovering a node reveals: its statement, its parents, its plates."""
+        head = node.name + (f"[{node.sub}]" if node.sub else "")
+        lines = [f"{head} {'=' if node.kind == 'det' else '~'} {node.dist}"
+                 if node.dist else head]
+        parents = model.parents(node.name)
+        lines.append("parents: " + (", ".join(parents) if parents else "none (root)"))
+        if node.plates:
+            lines.append("inside: " + " · ".join(
+                f"{model.plates[p].var} = {model.plates[p].span}" for p in node.plates))
+        lines.append({"obs": "observed", "det": "deterministic",
+                      "fixed": "fixed hyperparameter"}.get(node.kind, "latent"))
+        return lines
+
+
+    def place_tip(box_w, box_h, x, y, canvas, avoid):
+        """Put the card beside the node, on whichever side hides the least."""
+        width, height = canvas
+        corners = [
+            (x + NODE_R + 12, y - box_h / 2),
+            (x - NODE_R - 12 - box_w, y - box_h / 2),
+            (x - box_w / 2, y + NODE_R + 14),
+            (x - box_w / 2, y - NODE_R - 14 - box_h),
+        ]
+        best, best_cost = None, None
+        for left, top in corners:
+            left = min(max(left, 6), max(width - box_w - 6, 6))
+            top = min(max(top, 6), max(height - box_h - 6, 6))
+            card = (left, top, left + box_w, top + box_h)
+            cost = sum(
+                weight * max(0.0, min(card[2], b[2]) - max(card[0], b[0]))
+                * max(0.0, min(card[3], b[3]) - max(card[1], b[1]))
+                for b, weight in avoid
+            )
+            if best_cost is None or cost < best_cost:
+                best, best_cost = (left, top), cost
+        return best
+
+
+    def tooltip_card(uid, name, lines, x, y, canvas, avoid):
+        """A card pinned near the node, hidden until that node is hovered."""
+        box_w = 7.3 * max(len(line) for line in lines) + 20
+        box_h = TIP_LEAD * len(lines) + 13
+        left, top = place_tip(box_w, box_h, x, y, canvas, avoid)
+        rows = "".join(
+            f'<text x="{left + 10:.1f}" y="{top + 19 + i * TIP_LEAD:.1f}" '
+            f'font-size="{TIP_SIZE}" fill="{INK if i == 0 else "#5b616b"}">'
+            f"{xml_escape(line)}</text>"
+            for i, line in enumerate(lines)
+        )
+        return (f'<g id="{uid}-t-{name}" class="tip" font-family="{MONO}">'
+                f'<rect x="{left:.1f}" y="{top:.1f}" width="{box_w:.1f}" '
+                f'height="{box_h:.1f}" rx="6" fill="#ffffff" stroke="{HOVER}" '
+                f'stroke-width="1.1"/>{rows}</g>')
+
+
+    def hover_css(uid, model):
+        """One rule per node: light up its incoming edges, parents and tooltip."""
+        rules = [
+            f"#{uid} .tip{{opacity:0;pointer-events:none}}",
+            f"#{uid} .ring{{opacity:0;pointer-events:none;fill:none;"
+            f"stroke:{HOVER};stroke-width:2.4}}",
+            f"#{uid} .node{{cursor:default}}",
+        ]
+        for name in model.nodes:
+            seen = f"#{uid}:has(#{uid}-n-{name}:hover)"
+            lit = [f"{seen} #{uid}-t-{name}{{opacity:1}}",
+                   f"{seen} #{uid}-r-{name}{{opacity:1}}"]
+            parents = [p for p in model.parents(name) if p in model.nodes]
+            if parents:
+                lit.append(",".join(f"{seen} #{uid}-e-{p}-{name}" for p in parents)
+                           + f"{{stroke:{HOVER};stroke-width:2.6;"
+                             f"marker-end:url(#{uid}-lit)}}")
+                lit.append(",".join(f"{seen} #{uid}-r-{p}" for p in parents)
+                           + "{opacity:1}")
+            rules.extend(lit)
+        return "<style>" + "".join(rules) + "</style>"
+
 
     def to_svg(model, direction="TB", scale=1.0, title=""):
-        """Render the model as a standalone SVG document."""
+        """Render the model as a standalone, self-contained SVG document."""
         if not model.nodes:
             return ('<svg xmlns="http://www.w3.org/2000/svg" width="340" height="70">'
                     f'<text x="14" y="40" font-family="{SERIF}" font-size="15" '
                     'fill="#8b9096">nothing to draw yet</text></svg>')
 
+        uid = uid_for(model)
         pos, bends, rects, box = layout(model, direction)
         margin = 24
         top = margin + (32 if title else 0)
@@ -786,13 +927,12 @@ def _(NODE_R, layout, node_label, split_name):
             x1, y1 = at(rect[:2])
             x2, y2 = at(rect[2:])
             plate = model.plates[pid]
-            label = f"{split_name(plate.var)[0]} = {plate.span}"
             out.append(f'<rect x="{x1:.1f}" y="{y1:.1f}" width="{x2 - x1:.1f}" '
                        f'height="{y2 - y1:.1f}" rx="7" fill="none" stroke="#7c828d" '
                        f'stroke-width="1.2"/>')
             out.append(f'<text x="{x2 - 9:.1f}" y="{y2 - 9:.1f}" font-size="13" '
                        f'font-style="italic" text-anchor="end" fill="#5b616b">'
-                       f'{xml_escape(label)}</text>')
+                       f'{xml_escape(split_name(plate.var)[0])} = {xml_escape(plate.span)}</text>')
 
         for src, dst in model.edges:
             if src not in pos or dst not in pos:
@@ -800,32 +940,58 @@ def _(NODE_R, layout, node_label, split_name):
             points = [at(pos[src])] + [at(p) for p in bends.get((src, dst), [])] + [at(pos[dst])]
             r1 = 6 if model.nodes[src].kind == "fixed" else NODE_R
             r2 = (6 if model.nodes[dst].kind == "fixed" else NODE_R) + 8
-            points = trim_ends(points, r1, r2)
-            path = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
-            out.append(f'<polyline points="{path}" fill="none" stroke="{INK}" '
-                       f'stroke-width="1.35" stroke-linejoin="round" '
-                       f'marker-end="url(#arrow)"/>')
+            path = " ".join(f"{x:.1f},{y:.1f}" for x, y in trim_ends(points, r1, r2))
+            out.append(f'<polyline id="{uid}-e-{src}-{dst}" points="{path}" fill="none" '
+                       f'stroke="{INK}" stroke-width="1.35" stroke-linejoin="round" '
+                       f'marker-end="url(#{uid}-arrow)"/>')
 
+        def circle_box(name, pad=0):
+            cx, cy = at(pos[name])
+            r = (6 if model.nodes[name].kind == "fixed" else NODE_R) + pad
+            return (cx - r, cy - r, cx + r, cy + r)
+
+        tips, rings = [], []
         for name, node in model.nodes.items():
             x, y = at(pos[name])
-            tip = f'<title>{xml_escape(name)} {"~" if node.kind != "det" else "="} {xml_escape(node.dist)}</title>' if node.dist else ""
+            radius = 6 if node.kind == "fixed" else NODE_R
             if node.kind == "fixed":
-                out.append(f'<g>{tip}<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="{INK}"/>'
-                           + svg_label(node, x, y - 15, size=14) + "</g>")
-                continue
-            fill = SHADE if node.kind == "obs" else "#ffffff"
-            dash = ' stroke-dasharray="5 3"' if node.kind == "det" else ""
-            out.append(f'<g>{tip}<circle cx="{x:.1f}" cy="{y:.1f}" r="{NODE_R}" fill="{fill}" '
-                       f'stroke="{INK}" stroke-width="1.4"{dash}/>' + svg_label(node, x, y) + "</g>")
+                body = (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="{INK}"/>'
+                        + svg_label(node, x, y - 15, size=14))
+            else:
+                dash = ' stroke-dasharray="5 3"' if node.kind == "det" else ""
+                body = (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{NODE_R}" '
+                        f'fill="{SHADE if node.kind == "obs" else "#ffffff"}" '
+                        f'stroke="{INK}" stroke-width="1.4"{dash}/>' + svg_label(node, x, y))
+            out.append(f'<g id="{uid}-n-{name}" class="node">{body}</g>')
+            rings.append(f'<circle id="{uid}-r-{name}" class="ring" cx="{x:.1f}" '
+                         f'cy="{y:.1f}" r="{radius + 5}"/>')
+            kin = set(model.parents(name)) | {name}
+            avoid = [(circle_box(other, 6), 5.0 if other in kin else 1.0)
+                     for other in model.nodes]
+            for parent in model.parents(name):          # keep the lit edges visible
+                if parent in pos:
+                    route = [at(pos[parent])] + [at(b) for b in bends.get((parent, name), [])]
+                    route.append((x, y))
+                    avoid.append(((min(p[0] for p in route) - 4, min(p[1] for p in route) - 4,
+                                   max(p[0] for p in route) + 4, max(p[1] for p in route) + 4),
+                                  2.0))
+            tips.append(
+                tooltip_card(uid, name, relation_lines(model, node), x, y, (w, h), avoid)
+            )
+
+        def marker(name, colour):
+            return (f'<marker id="{name}" viewBox="0 0 10 10" refX="9" refY="5" '
+                    'markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">'
+                    f'<path d="M 0 0 L 10 5 L 0 10 z" fill="{colour}"/></marker>')
 
         return (
-            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w:.0f} {h:.0f}" '
-            f'width="{w * scale:.0f}" height="{h * scale:.0f}" font-family="{SERIF}">'
-            '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
-            'markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">'
-            f'<path d="M 0 0 L 10 5 L 0 10 z" fill="{INK}"/></marker></defs>'
-            '<rect width="100%" height="100%" fill="#ffffff" rx="8"/>'
-            + "".join(out) + "</svg>"
+            f'<svg xmlns="http://www.w3.org/2000/svg" id="{uid}" '
+            f'viewBox="0 0 {w:.0f} {h:.0f}" width="{w * scale:.0f}" '
+            f'height="{h * scale:.0f}" font-family="{SERIF}">'
+            f'<defs>{marker(uid + "-arrow", INK)}{marker(uid + "-lit", HOVER)}</defs>'
+            + hover_css(uid, model)
+            + '<rect width="100%" height="100%" fill="#ffffff" rx="8"/>'
+            + "".join(out + rings + tips) + "</svg>"
         )
 
     return (to_svg,)
@@ -1086,6 +1252,17 @@ def _(
                 for export in (to_svg, to_dot, to_tikz, to_daft, to_mermaid):
                     if model.nodes or export is to_svg:
                         assert export(model).strip()
+
+        @check("hovering is wired up for every node and edge")
+        def _():
+            svg = to_svg(lda)
+            assert svg.count('class="tip"') == len(lda.nodes)
+            assert svg.count('class="ring"') == len(lda.nodes)
+            for s, d in lda.edges:
+                assert f"-e-{s}-{d}" in svg
+            for name in lda.nodes:
+                assert f"-n-{name}:hover)" in svg
+            assert "Categorical(phi[z[d,n]])" in svg   # the statement, verbatim
 
         @check("junk lines warn instead of raising")
         def _():
