@@ -14,10 +14,11 @@ app = marimo.App(width="medium", auto_download=["html"])
 @app.cell
 def _():
     import marimo as mo
+    import ast
     import re
     from dataclasses import dataclass, field
 
-    return dataclass, field, mo, re
+    return ast, dataclass, field, mo, re
 
 
 @app.cell
@@ -235,8 +236,7 @@ def _(mo, model, run_fit, to_pymc):
             and the plain scaffold are unaffected.
             """
         )
-    fit = None if _failure else {"idata": _env["idata"], "truth": _env["truth"],
-                                 "data": _env["data"], "code": _code}
+    fit = None if _failure else dict(_env["results"], code=_code)
     _failure if _failure else mo.md("Fitted. Results below.")
     return (fit,)
 
@@ -1596,11 +1596,10 @@ def _(
 
         if runnable:
             sizes = demo_sizes(model)
-            givens = ["rng = np.random.default_rng(0)"]
-            givens += [f"{plate_size(p)} = {sizes[pid]}   # {p.var} = {p.span}"
-                       for pid, p in model.plates.items()]
-            givens += [f"{n.name} = {demo_value(model, n, support)}   # given"
-                       for n in model.nodes.values() if n.kind == "fixed"]
+            givens = [f"{n.name} = {demo_value(model, n, support)}   # given"
+                      for n in model.nodes.values() if n.kind == "fixed"]
+            if any("rng." in given for given in givens):
+                givens.insert(0, "rng = np.random.default_rng(seed)")
         else:
             givens = [f"{plate_size(p)} = ...  # how far {p.var} runs ({p.span})"
                       for p in model.plates.values()]
@@ -1610,47 +1609,72 @@ def _(
                        for n in model.nodes.values() if n.kind == "obs"]
         givens = list(dict.fromkeys(givens))
 
-        lines = ["import numpy as np", "import pymc as pm", ""]
-        lines.append("# Generated from a plate model. The structure is exactly what was drawn;"
-                     if runnable else
-                     "# Generated from a plate model — the structure is exact; every `...`")
-        lines.append("# the numbers below are stand-ins you can replace with real data."
-                     if runnable else
-                     "# is data or a size the diagram never knew about.")
-        lines += [f"# TODO: {note}" for note in todo]
-        lines += [""] + givens + [""]
-        if coords:
-            lines += ["coords = {"] + coords + ["}", ""]
-
-        lines += [
-            "def build(data=None):",
-            '    """The plate model. Pass data to condition on it, omit it to simulate."""',
-            "    with pm.Model(" + ("coords=coords" if coords else "") + ") as built:",
-        ]
-        lines += body or ["        pass"]
-        lines += ["    return built", ""]
-
         if not runnable:
+            lines = [
+                "import pymc as pm",
+                "",
+                "# Generated from a plate model — the structure is exact; every `...`",
+                "# is data or a size the diagram never knew about. Pasted into a marimo",
+                "# cell, the names below join the notebook's graph, so keep them clear of",
+                "# names it already owns.",
+            ]
+            lines += [f"# TODO: {note}" for note in todo]
+            lines += [""] + givens + [""]
+            if coords:
+                lines += ["coords = {"] + coords + ["}", ""]
             lines += [
-                "# `_model` keeps the underscore so this drops into a marimo cell as well",
-                "# as a script; pass `build(...)` the arrays your observed nodes are fitted to.",
+                "def build(data=None):",
+                '    """The plate model. Pass data to condition on it, omit it to simulate."""',
+                "    with pm.Model(" + ("coords=coords" if coords else "") + ") as built:",
+            ]
+            lines += body or ["        pass"]
+            lines += [
+                "    return built",
+                "",
                 "_model = build({" + ", ".join(f'"{n}": {n}{PYMC_DATA}' for n in observed) + "})",
             ]
             return "\n".join(lines)
 
+        # Runnable: everything lives inside one function, so the whole program can be
+        # pasted into a marimo cell without a single name joining the notebook's graph.
+        plates = [(plate_size(p), sizes[pid]) for pid, p in model.plates.items()]
+        signature = ", ".join([f"{name}={value}" for name, value in dict(plates).items()]
+                              + ["seed=0"])
+        lines = [f"def simulate_and_fit({signature}):",
+                 '    """Simulate one dataset from this model, then fit it back.',
+                 "",
+                 "    The plates fix the structure; the sizes above are stand-ins. Every",
+                 "    name is local, so this drops into a marimo cell as it stands.",
+                 '    """']
+        lines += [f"    # TODO: {note}" for note in todo]
+        lines += ["    import numpy as np", "    import pymc as pm", ""]
+        lines += ["    " + given for given in givens]
+        if coords:
+            lines += ["", "    coords = {"] + ["    " + c for c in coords] + ["    }"]
         lines += [
-            "# One dataset simulated from the model itself, so the true values are known.",
-            "_prior = build()",
-            "truth = dict(zip([v.name for v in _prior.free_RVs],",
-            "                 pm.draw(_prior.free_RVs, random_seed=0)))",
-            "data = {" + ", ".join(f'"{n}": truth["{n}"]' for n in observed) + "}",
             "",
-            "# The same model, conditioned on it.",
-            "_model = build(data)",
-            "idata = pm.sample(",
-            "    draws=500, tune=500, chains=2, cores=1,",
-            "    random_seed=0, progressbar=False, model=_model,",
-            ")",
+            "    def build(data=None):",
+            "        with pm.Model(" + ("coords=coords" if coords else "") + ") as built:",
+        ]
+        lines += ["    " + statement for statement in body] or ["            pass"]
+        lines += [
+            "        return built",
+            "",
+            "    # One dataset drawn from the model itself, so the truth is known.",
+            "    prior = build()",
+            "    truth = dict(zip([v.name for v in prior.free_RVs],",
+            "                     pm.draw(prior.free_RVs, random_seed=seed)))",
+            "    data = {" + ", ".join(f'"{n}": truth["{n}"]' for n in observed) + "}",
+            "",
+            "    fitted = build(data)          # the same model, conditioned on it",
+            "    idata = pm.sample(",
+            "        draws=500, tune=500, chains=2, cores=1,",
+            "        random_seed=seed, progressbar=False, model=fitted,",
+            "    )",
+            '    return {"idata": idata, "truth": truth, "data": data, "model": fitted}',
+            "",
+            "",
+            "results = simulate_and_fit()",
         ]
         return "\n".join(lines)
 
@@ -1868,6 +1892,7 @@ def _():
 def _(
     EXAMPLES,
     NODE_R,
+    ast,
     layout,
     mo,
     nested_plates,
@@ -1983,6 +2008,12 @@ def _(
                     continue
                 assert "pm.draw(" in code and "pm.sample(" in code
                 assert " = ..." not in code, f"{name} still has a placeholder"
+                # every name stays inside the function, so it can be pasted into
+                # a marimo cell without colliding with the notebook's own graph
+                _top = ast.parse(code).body
+                assert {type(_n).__name__ for _n in _top} == {"FunctionDef", "Assign"}
+                assert [_t.id for _n in _top if isinstance(_n, ast.Assign)
+                        for _t in _n.targets] == ["results"]
             sprinkler = to_pymc(parse(EXAMPLES["Sprinkler (plain edges)"]), runnable=True)
             assert sprinkler.startswith("# Nothing to run")   # arrows alone cannot fit
 
