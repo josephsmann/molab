@@ -1639,7 +1639,7 @@ def _(
         # pasted into a marimo cell without a single name joining the notebook's graph.
         plates = [(plate_size(p), sizes[pid]) for pid, p in model.plates.items()]
         signature = ", ".join([f"{name}={value}" for name, value in dict(plates).items()]
-                              + ["seed=0"])
+                              + ["seed=0", "chains=4", "cores=4"])
         lines = [f"def simulate_and_fit({signature}):",
                  '    """Simulate one dataset from this model, then fit it back.',
                  "",
@@ -1668,7 +1668,7 @@ def _(
             "",
             "    fitted = build(data)          # the same model, conditioned on it",
             "    idata = pm.sample(",
-            "        draws=500, tune=500, chains=2, cores=1,",
+            "        draws=500, tune=500, chains=chains, cores=cores,",
             "        random_seed=seed, progressbar=False, model=fitted,",
             "    )",
             '    return {"idata": idata, "truth": truth, "data": data, "model": fitted}',
@@ -2007,6 +2007,7 @@ def _(
                 if not model.nodes or code.startswith("# Nothing to run"):
                     continue
                 assert "pm.draw(" in code and "pm.sample(" in code
+                assert "chains=chains, cores=cores" in code and "chains=4, cores=4" in code
                 assert " = ..." not in code, f"{name} still has a placeholder"
                 # every name stays inside the function, so it can be pasted into
                 # a marimo cell without colliding with the notebook's own graph
