@@ -12,7 +12,7 @@
 
 import marimo
 
-__generated_with = "0.23.14"
+__generated_with = "0.24.0"
 app = marimo.App(width="medium")
 
 
@@ -242,6 +242,79 @@ def _(mo):
     **Skew rank is always even**, so in odd dimension there is always a leftover
     zero direction. A $5\times5$ skew matrix has rank $\le 4$ — never 5.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+
+    mo.accordion(
+        {
+            r"**Notation:** what is $\oplus$?": mo.md(
+                r"""
+                $\oplus$ is the **direct sum** — *put these side by side in independent
+                coordinates, with nothing crossing between them*. It is not addition:
+                the pieces do not overlap, they occupy separate slots.
+
+                **On matrices.** For $A$ of size $m$ and $B$ of size $n$,
+
+                $$A \oplus B = \begin{bmatrix} A & 0 \\ 0 & B \end{bmatrix}$$
+
+                of size $m + n$ — block diagonal, zeros off the blocks. In code this is
+                `scipy.linalg.block_diag(A, B)`.
+
+                The zeros carry the meaning. Because the off-diagonal blocks vanish, the
+                matrix never mixes the first two coordinates with the second two: a vector
+                living in block 1 maps into block 1. Each block is a sealed subsystem.
+
+                **On spaces.** $V = U \oplus W$ means every $v$ splits as $u + w$ with
+                $u \in U$, $w \in W$, **uniquely**, and $U \cap W = \{0\}$. That is the
+                sense used in §4 and §7: $L = G + C$ is not one decomposition among many,
+                it is *the* decomposition, which is what makes `hodge_split` well defined.
+
+                The two senses are the same fact. A block-diagonal matrix is exactly a map
+                that respects a direct-sum split of the space it acts on.
+
+                **Here.** $Q^\top C Q = \lambda_1 J \oplus \lambda_2 J \oplus 0$ says the
+                style planes are mutually oblivious — pace-vs-patience and power-vs-touch
+                add independently, and $\lambda_k$ says how hard each one bites. The
+                trailing $0$ is a zero *block* of whatever dimension is left over, not a
+                single entry: it is the leftover direction with no style content, the
+                reason skew rank is even.
+
+                ---
+
+                **Is the $\sum_k$ below doing $\oplus$ operations?** No — it is ordinary
+                addition of real numbers. The type signatures differ: $\oplus$ combines
+                *matrices into a larger matrix* (or subspaces into a larger space), while
+                $\sum_k \lambda_k (s_i^{(k)} \times s_j^{(k)})$ adds *scalars*. By then the
+                vectors have been contracted against each block and you have landed in
+                $\mathbb{R}$.
+
+                But the $\oplus$ is precisely *why* that sum takes this form. Writing
+                $b = Q^\top a$,
+
+                $$m(i,j) = a_i^\top C a_j = b_i^\top \left( Q^\top C Q \right) b_j
+                = \sum_{k,\ell} \left( b_i^{(k)} \right)^\top T_{k\ell}\, b_j^{(\ell)}$$
+
+                which is a **double** sum over every pair of blocks — each style plane
+                potentially interacting with every other. The direct-sum structure says
+                $T_{k\ell} = 0$ for $k \neq \ell$, so every cross term dies and the double
+                sum collapses to a single $\sum_k$. A general skew $C$ *would* carry those
+                cross terms; rotating into canonical coordinates is what removes them.
+
+                So: $\oplus$ upstream, $\sum$ downstream. The direct sum is a structural
+                claim about the operator; the plain sum is what that structure buys you
+                when you evaluate it. Staying at matrix level you may write the same fact
+                with $\oplus$ throughout:
+
+                $$Q^\top C Q = \bigoplus_k \lambda_k J,
+                \qquad J = \begin{bmatrix} 0 & 1 \\ -1 & 0 \end{bmatrix}$$
+                """
+            )
+        }
+    )
+
     return
 
 
