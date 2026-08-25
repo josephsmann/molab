@@ -310,8 +310,9 @@ def _(mo):
     The general matchup term is written $m(i,j) = a_i^\top C\, a_j$ with $C$
     **skew-symmetric** ($C^\top = -C$). That looks forbidding. It isn't.
 
-    **Fact.** Every real skew-symmetric matrix can be rotated by an orthogonal $Q$
-    into block-diagonal form with $2\times2$ blocks
+    **Fact** (Youla's real canonical form). Every real skew-symmetric matrix can be
+    brought by an **orthogonal** change of basis $Q$ into block-diagonal form: $2\times2$
+    blocks, then a zero block filling whatever dimension is left over,
 
     $$Q^\top C Q = \begin{bmatrix} 0 & \lambda_1 \\ -\lambda_1 & 0 \end{bmatrix}
     \oplus \begin{bmatrix} 0 & \lambda_2 \\ -\lambda_2 & 0 \end{bmatrix} \oplus \cdots \oplus 0$$
@@ -323,11 +324,17 @@ def _(mo):
     $$m(i,j) = \sum_k \lambda_k \left( s_i^{(k)} \times s_j^{(k)} \right)$$
 
     Rank 2 = one style circle. Rank 4 = two independent circles (say pace-vs-patience
-    and power-vs-touch). The matrix $C$ is just this before you rotate into the
+    and power-vs-touch). The matrix $C$ is just this before you change to the
     natural coordinates.
 
     **Skew rank is always even**, so in odd dimension there is always a leftover
-    zero direction. A $5\times5$ skew matrix has rank $\le 4$ — never 5.
+    zero direction. A $5\times5$ skew matrix has rank $\le 4$ — never 5. That is also why
+    the trailing $0$ above is **not optional**: whenever $C$ is singular the form needs it.
+
+    **One caution on "orthogonal".** $Q$ need not be a *rotation*. Pinning every
+    $\lambda_k > 0$ can force a reflection — rotations commute with $J$, so none of them can
+    flip that sign. Only $|\lambda_k|$ is basis-independent, which is why `skew_canonical`
+    returns absolute values.
     """)
     return
 
