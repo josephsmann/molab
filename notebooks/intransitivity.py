@@ -119,6 +119,93 @@ def _(mo):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+
+    mo.accordion(
+        {
+            r"**Aside:** what a skew-symmetric matrix *means*": mo.md(
+                r"""
+                Skew-symmetry is easy to accept as bookkeeping and easy to miss as
+                geometry. One fact generates the rest: **a skew matrix is an
+                infinitesimal rotation.**
+
+                | | symmetric $S$ | skew $C$ |
+                |---|---|---|
+                | $x^\top M x$ | meaningful (energy, variance) | **identically zero** |
+                | eigenvalues | real | purely imaginary, $\pm i\lambda$ |
+                | eigenvectors | orthogonal axes to stand on | none real, only the kernel |
+                | $\exp(M)$ | a stretch | a **rotation** |
+                | it measures | alignment, length | **area, orientation** |
+
+                The first row is the tell. $x^\top C x = 0$ for *every* $x$ — a skew matrix
+                carries no quadratic form at all, so it structurally cannot answer "how much
+                of $x$ is there?", the question every symmetric matrix exists to answer. It
+                must be reporting on *pairs* of distinct vectors instead.
+
+                The fourth row says what: $\exp(tC)$ is orthogonal with $\det = 1$ for all
+                $t$, so $C$ is the **velocity of a rotation** — the derivative at the
+                identity of a one-parameter family of rotations. Imaginary eigenvalues
+                $\pm i\lambda$ mean no stretching in any direction, only angular speed
+                $\lambda$ within a plane.
+
+                **This is why $0°$ and $180°$ both vanish.** Since
+                $a^\top J b = \|a\|\|b\| \sin \Delta\theta$ is the *signed area of the
+                parallelogram* spanned by $a$ and $b$, the two "surprises" above are one
+                sentence: you cannot build a parallelogram out of two parallel sticks, and
+                antiparallel is still parallel. Perpendicular spans the most area. The
+                rock-paper-scissors 3-cycle is an **orientation** — three vectors where each
+                consecutive pair sweeps positive area.
+
+                **And why skew rank is even.** Rotation happens *in a plane*, and a plane
+                costs two dimensions, so rank arrives in pairs. In odd dimension something is
+                always left over — which is Euler's rotation theorem ("every rotation of
+                3-space has an axis") in disguise. Sharpest case: every $3\times3$ skew matrix
+                is $v \mapsto w \times v$ for a fixed $w$, with $\ker = w$ the axis. The 2D
+                cross product used here is not an *analogy* to rotation; it is rotation, one
+                dimension down.
+
+                ---
+
+                **Every matrix splits into symmetric and skew parts.** For any square $M$,
+
+                $$M = \underbrace{\frac{M + M^\top}{2}}_{\text{symmetric}}
+                \;+\; \underbrace{\frac{M - M^\top}{2}}_{\text{skew}}$$
+
+                uniquely, and the two parts are **orthogonal** under the trace inner product
+                $\langle X, Y \rangle = \operatorname{tr}(X^\top Y)$. The dimensions partition
+                cleanly: $\frac{n(n+1)}{2} + \frac{n(n-1)}{2} = n^2$, or $10 + 6 = 16$ at
+                $n = 4$. So "symmetric" and "skew" are not two adjectives a matrix might
+                happen to have — they are **complementary halves of all of matrix space**,
+                the stretch part and the turn part of any linear map.
+
+                This is the prototype for §4. There the same move is made one level in: $L$ is
+                *already* skew, and the Hodge split cuts the skew half itself into gradient
+                plus circulation.
+
+                **Worth being explicit:** skew-symmetry is not what makes a matchup
+                intransitive. $L$ is skew, $C$ is skew, and the pure rating matrix
+                $G_{ij} = u_i - u_j$ is skew too — and perfectly transitive. Skew-symmetry is
+                the **arena**, forced the moment you say a match has a winner and a loser
+                ($P_{ij} + P_{ji} = 1$); it models nothing by itself.
+
+                That arena has a shape. A skew $n \times n$ matrix has $\binom{n}{2}$ free
+                entries, one per *unordered pair* with a sign for direction — precisely a
+                **flow on the edges of the complete graph** $K_n$:
+
+                $$\{\text{skew } n \times n\} \;\cong\; \mathbb{R}^E,
+                \qquad \dim = \binom{n}{2}$$
+
+                which is why §7 can start talking about incidence operators without changing
+                the subject. At $n = 4$: $6 = 3 + 3$, three degrees of rating freedom and
+                three of genuine circulation.
+                """
+            )
+        }
+    )
+    return
+
+
 @app.cell
 def _(np):
     def sigmoid(z):
@@ -291,17 +378,41 @@ def _(mo):
                 vectors have been contracted against each block and you have landed in
                 $\mathbb{R}$.
 
-                But the $\oplus$ is precisely *why* that sum takes this form. Writing
-                $b = Q^\top a$,
+                But the $\oplus$ is precisely *why* that sum takes this form. Write
+                $T = Q^\top C Q$ for the canonical form and $b = Q^\top a$ for coordinates in the
+                basis that exposes it. Partition the indices $\{1, \dots, n\}$ into the consecutive
+                groups those blocks occupy — $\{1,2\}, \{3,4\}, \dots$, followed by the leftover
+                kernel indices — and let $b^{(k)}$ be the slice of $b$ lying in group $k$.
 
-                $$m(i,j) = a_i^\top C a_j = b_i^\top \left( Q^\top C Q \right) b_j
+                **$T_{k\ell}$ is a sub*matrix*, not an entry** — the rectangular block of $T$ sitting
+                in block-row $k$ and block-column $\ell$:
+
+                $$T_{k\ell} \;=\; \big[\, T_{pq} \,\big]_{\,p \,\in\, \text{group } k,\;\,
+                q \,\in\, \text{group } \ell} \;\in\; \mathbb{R}^{\,n_k \times n_\ell}$$
+
+                For the $5 \times 5$ example below the groups are $\{1,2\}, \{3,4\}, \{5\}$, so
+                $T_{11}$ and $T_{12}$ are $2 \times 2$, while $T_{13}$ is $2 \times 1$ and $T_{33}$ is
+                the $1 \times 1$ leftover. Multiplying blockwise,
+
+                $$m(i,j) = a_i^\top C a_j = b_i^\top T\, b_j
                 = \sum_{k,\ell} \left( b_i^{(k)} \right)^\top T_{k\ell}\, b_j^{(\ell)}$$
 
-                which is a **double** sum over every pair of blocks — each style plane
-                potentially interacting with every other. The direct-sum structure says
-                $T_{k\ell} = 0$ for $k \neq \ell$, so every cross term dies and the double
-                sum collapses to a single $\sum_k$. A general skew $C$ *would* carry those
-                cross terms; rotating into canonical coordinates is what removes them.
+                a **double** sum over every pair of groups — each style plane potentially interacting
+                with every other. So far this is only block matrix multiplication; no structure has
+                been used. The direct sum is exactly the claim that
+
+                $$T_{kk} = \lambda_k J \qquad\text{and}\qquad T_{k\ell} = 0
+                \;\;\text{ for } k \neq \ell$$
+
+                so every cross term dies and the double sum collapses to a single $\sum_k$, whose
+                $k$-th term is $\lambda_k \big( s_i^{(k)} \times s_j^{(k)} \big)$ once you write out
+                $b^\top J b'$. A general skew $C$ *would* carry those cross terms; rotating into
+                canonical coordinates is what removes them.
+
+                *Sign convention.* $\lambda_k$ is determined only up to a choice — flipping one basis
+                vector inside a plane reverses that plane's circulation and the sign of $\lambda_k$
+                with it. Only $|\lambda_k|$ is invariant, which is why `skew_canonical` returns
+                absolute values.
 
                 So: $\oplus$ upstream, $\sum$ downstream. The direct sum is a structural
                 claim about the operator; the plain sum is what that structure buys you
@@ -314,7 +425,6 @@ def _(mo):
             )
         }
     )
-
     return
 
 
