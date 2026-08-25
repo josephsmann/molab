@@ -24,9 +24,11 @@ def _():
     import altair as alt
     import pytest
     from scipy.linalg import schur
+    from scipy.optimize import minimize
 
     rng = np.random.default_rng(0)
-    return alt, mo, np, pl, pytest, rng, schur
+
+    return alt, minimize, mo, np, pl, pytest, rng, schur
 
 
 @app.cell
@@ -933,6 +935,582 @@ def _(mo):
     players. The top singular pair gives each player an interpretable
     "what kind of player are you" coordinate.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Running the checklist
+
+    The functions below implement items 1, 2, 4, 5, 6 and 7 as things you can actually
+    run. Item 3 is a modelling decision, not a diagnostic, so it has no code here.
+
+    **Pointing this at real data.** Every ClubLocker export reduces to a list of
+    `(winner, loser)` pairs, so that is the only input `pairs_to_matrices` asks for. It
+    returns the `(wins, games)` pair that every function downstream consumes. The demo
+    below runs on a *simulated* league with ClubLocker's awkward shape — two weakly-linked
+    clubs, wildly uneven schedule, most pairs never meeting — because this repo is public
+    and real match records with real names do not belong in it.
+    """)
+    return
+
+
+@app.cell
+def _(np, sigmoid):
+
+    def pairs_to_matrices(results, players=None):
+        """[(winner, loser), ...] -> (wins, games, names).
+
+        wins[i, j] = times i beat j; games[i, j] = times they met (symmetric).
+        Unplayed pairs stay 0 in *games* -- that is the mask, and it is what
+        distinguishes a missing pair from a structural L_ii = 0.
+        """
+        _res = list(results)
+        if players is None:
+            _seen = {}
+            for _w, _l in _res:
+                _seen.setdefault(_w, None)
+                _seen.setdefault(_l, None)
+            players = sorted(_seen)
+        _idx = {_p: _k for _k, _p in enumerate(players)}
+        _n = len(players)
+        _W = np.zeros((_n, _n))
+        _G = np.zeros((_n, _n))
+        for _w, _l in _res:
+            _i, _j = _idx[_w], _idx[_l]
+            _W[_i, _j] += 1
+            _G[_i, _j] += 1
+            _G[_j, _i] += 1
+        return _W, _G, list(players)
+
+
+    def split_games(wins, games, frac=0.3, seed=0):
+        """Hypergeometric train/test split within each pair's own game count.
+
+        Splitting *within* a pair, not across pairs, keeps every player in both
+        folds -- a held-out pair whose players never appear in training has no
+        rating to predict from.
+        """
+        _r = np.random.default_rng(seed)
+        _W, _G = np.asarray(wins, float), np.asarray(games, float)
+        _n = _W.shape[0]
+        _Wte, _Gte = np.zeros((_n, _n)), np.zeros((_n, _n))
+        for _i in range(_n):
+            for _j in range(_i + 1, _n):
+                _tot = int(_G[_i, _j])
+                _nte = int(round(frac * _tot))
+                if _tot == 0 or _nte == 0:
+                    continue
+                _wte = int(_r.hypergeometric(int(_W[_i, _j]), _tot - int(_W[_i, _j]), _nte))
+                _Wte[_i, _j], _Wte[_j, _i] = _wte, _nte - _wte
+                _Gte[_i, _j] = _Gte[_j, _i] = _nte
+        return _W - _Wte, _G - _Gte, _Wte, _Gte
+
+
+    def logloss(L, wins, games):
+        """Mean per-game binary log-loss, over observed pairs only."""
+        _iu = np.triu_indices(np.asarray(L).shape[0], 1)
+        _p = np.clip(sigmoid(np.asarray(L, float)[_iu]), 1e-12, 1 - 1e-12)
+        _w, _n = np.asarray(wins, float)[_iu], np.asarray(games, float)[_iu]
+        _m = _n > 0
+        if not _m.any():
+            return float("nan")
+        return float(
+            -(_w[_m] * np.log(_p[_m]) + (_n[_m] - _w[_m]) * np.log(1 - _p[_m])).sum() / _n[_m].sum()
+        )
+
+
+    return logloss, pairs_to_matrices, split_games
+
+
+@app.cell
+def _(np):
+
+    def match_graph_report(games, names=None, tol=1e-9):
+        """Checklist 1: connectivity of the match graph, before any model.
+
+        Returns a dict; `laplacian_spectrum` is the thing to look at first. A
+        near-zero second eigenvalue (the Fiedler value) means weakly-linked pools.
+        """
+        _A = (np.asarray(games, float) > 0).astype(float)
+        np.fill_diagonal(_A, 0.0)
+        _n = _A.shape[0]
+        _names = list(names) if names is not None else [str(_k) for _k in range(_n)]
+        _lap = np.diag(_A.sum(axis=1)) - _A
+        _ev = np.linalg.eigvalsh(_lap)
+        _ncomp = int(np.sum(_ev < tol))
+        # Fiedler value = second-smallest eigenvalue. It is 0 exactly when the graph
+        # is disconnected, which is the signal we want -- not the first nonzero one.
+        _fiedler = float(_ev[1]) if _n > 1 else 0.0
+        # within-component gap: useful once you know it is connected
+        _gap = float(_ev[_ncomp]) if _ncomp < _n else 0.0
+
+        # effective resistance: Var(u_i - u_j) is proportional to this
+        _pinv = np.linalg.pinv(_lap)
+        _res = np.add.outer(np.diag(_pinv), np.diag(_pinv)) - 2 * _pinv
+
+        # bridges: an edge whose removal disconnects. Pure gradient, no style content.
+        _bridges = []
+        for _i in range(_n):
+            for _j in range(_i + 1, _n):
+                if _A[_i, _j] == 0:
+                    continue
+                _A2 = _A.copy()
+                _A2[_i, _j] = _A2[_j, _i] = 0.0
+                _lap2 = np.diag(_A2.sum(axis=1)) - _A2
+                if int(np.sum(np.linalg.eigvalsh(_lap2) < tol)) > _ncomp:
+                    _bridges.append((_names[_i], _names[_j]))
+
+        # the rating contrast the data determines worst
+        _res_masked = _res.copy()
+        np.fill_diagonal(_res_masked, -np.inf)
+        _wi, _wj = np.unravel_index(np.argmax(_res_masked), _res.shape)
+
+        _played = int((_A.sum()) // 2)
+        return {
+            "players": _n,
+            "pairs_played": _played,
+            "pairs_possible": _n * (_n - 1) // 2,
+            "density": _played / (_n * (_n - 1) / 2) if _n > 1 else 0.0,
+            "components": _ncomp,
+            "fiedler": _fiedler,
+            "spectral_gap": _gap,
+            "laplacian_spectrum": _ev,
+            "bridges": _bridges,
+            "resistance": _res,
+            "worst_contrast": (_names[int(_wi)], _names[int(_wj)], float(_res[_wi, _wj])),
+        }
+
+
+    def unplayed_mask(games):
+        """Checklist 2: True where a pair never met. Structural L_ii = 0 is NOT missing."""
+        _G = np.asarray(games, float)
+        _m = _G == 0
+        np.fill_diagonal(_m, False)
+        return _m
+
+
+    return match_graph_report, unplayed_mask
+
+
+@app.cell
+def _(empirical_logodds, hodge_split, np, sigmoid):
+
+    def count_intransitive_triples(wins, games, min_games=3):
+        """Checklist 5: model-free evidence that intransitivity exists at all.
+
+        Counts 3-cycles (A>B>C>A) among triples where all three pairs are
+        sufficiently sampled. Ties are broken toward the higher win count and
+        excluded when exactly even.
+        """
+        _W, _G = np.asarray(wins, float), np.asarray(games, float)
+        _n = _W.shape[0]
+        _beats = np.zeros((_n, _n), dtype=bool)
+        _decided = np.zeros((_n, _n), dtype=bool)
+        for _i in range(_n):
+            for _j in range(_n):
+                if _i != _j and _G[_i, _j] >= min_games and _W[_i, _j] != _G[_i, _j] / 2:
+                    _beats[_i, _j] = _W[_i, _j] > _G[_i, _j] / 2
+                    _decided[_i, _j] = True
+        _cyc = _tot = 0
+        for _i in range(_n):
+            for _j in range(_i + 1, _n):
+                for _k in range(_j + 1, _n):
+                    if not (_decided[_i, _j] and _decided[_j, _k] and _decided[_i, _k]):
+                        continue
+                    _tot += 1
+                    _fwd = _beats[_i, _j] and _beats[_j, _k] and _beats[_k, _i]
+                    _bwd = _beats[_j, _i] and _beats[_k, _j] and _beats[_i, _k]
+                    if _fwd or _bwd:
+                        _cyc += 1
+        return _cyc, _tot
+
+
+    def expected_triples_under_scalar(wins, games, min_games=3, n_rep=200, seed=0):
+        """Null for checklist 5: how many 3-cycles a *transitive* model produces anyway.
+
+        Fits the scalar part by Hodge projection, then resimulates the observed
+        schedule. Sampling noise alone creates cycles, so a raw count means nothing
+        without this floor.
+        """
+        _r = np.random.default_rng(seed)
+        _G = np.asarray(games, float)
+        _L, _ = empirical_logodds(wins, games)
+        _u, _Gm, _ = hodge_split(_L)
+        _P = sigmoid(_Gm)
+        _n = _G.shape[0]
+        _out = []
+        for _ in range(n_rep):
+            _Wn = np.zeros((_n, _n))
+            for _i in range(_n):
+                for _j in range(_i + 1, _n):
+                    if _G[_i, _j] > 0:
+                        _w = _r.binomial(int(_G[_i, _j]), _P[_i, _j])
+                        _Wn[_i, _j], _Wn[_j, _i] = _w, _G[_i, _j] - _w
+            _out.append(count_intransitive_triples(_Wn, _G, min_games)[0])
+        return np.array(_out)
+
+
+    return count_intransitive_triples, expected_triples_under_scalar
+
+
+@app.cell
+def _(logloss, minimize, np, pl, sigmoid, split_games):
+
+    def fit_paired_model(wins, games, rank=0, ridge=1e-2, seed=0):
+        """Checklist 7: MLE for L = (u_i - u_j) + sum_k (x_i y_j - y_i x_j).
+
+        rank=0 is Bradley-Terry / Elo. rank=2 adds one style circle, rank=4 two.
+        Unplayed pairs contribute nothing to the likelihood -- the mask is honoured
+        by construction, since games == 0 zeroes that term.
+        """
+        _W, _G = np.asarray(wins, float), np.asarray(games, float)
+        _n = _W.shape[0]
+        _iu = np.triu_indices(_n, 1)
+        _w, _g = _W[_iu], _G[_iu]
+        _npar = _n * rank
+
+        def _build(theta):
+            _u = theta[:_n]
+            _u = _u - _u.mean()
+            _L = np.subtract.outer(_u, _u)
+            _S = theta[_n:].reshape(_n, rank) if rank else np.zeros((_n, 0))
+            for _k in range(0, rank, 2):
+                _x, _y = _S[:, _k], _S[:, _k + 1]
+                _L = _L + (np.outer(_x, _y) - np.outer(_y, _x))
+            return _u, _S, _L
+
+        def _nll(theta):
+            _, _, _L = _build(theta)
+            _p = np.clip(sigmoid(_L[_iu]), 1e-12, 1 - 1e-12)
+            return -np.sum(_w * np.log(_p) + (_g - _w) * np.log(1 - _p)) + ridge * np.sum(theta**2)
+
+        _r = np.random.default_rng(seed)
+        _res = minimize(_nll, _r.normal(scale=0.1, size=_n + _npar), method="L-BFGS-B")
+        _u, _S, _L = _build(_res.x)
+        return {"u": _u, "S": _S, "L": _L, "converged": bool(_res.success), "nll": float(_res.fun)}
+
+
+    def holdout_comparison(wins, games, ranks=(0, 2, 4), frac=0.3, seed=0, ridge=1e-2):
+        """Fit each rank on a training split, score held-out log-loss.
+
+        The number that decides whether any of this is worth it. Expect a modest
+        overall gain concentrated on closely-matched pairs.
+        """
+        _Wtr, _Gtr, _Wte, _Gte = split_games(wins, games, frac=frac, seed=seed)
+        _rows = []
+        for _rk in ranks:
+            _fit = fit_paired_model(_Wtr, _Gtr, rank=_rk, ridge=ridge, seed=seed)
+            _rows.append(
+                {
+                    "model": "scalar (Elo)" if _rk == 0 else f"scalar + rank {_rk}",
+                    "rank": _rk,
+                    "train logloss": round(logloss(_fit["L"], _Wtr, _Gtr), 4),
+                    "held-out logloss": round(logloss(_fit["L"], _Wte, _Gte), 4),
+                    "converged": _fit["converged"],
+                }
+            )
+        return pl.DataFrame(_rows)
+
+
+    return fit_paired_model, holdout_comparison
+
+
+@app.cell
+def _(gradient_matrix, mo, np, sigmoid, style_matrix):
+
+    def make_league(games_per_pair, lam=1.2, n_club=7, seed=7):
+        """A league shaped like ClubLocker data rather than a clean round robin.
+
+        Two clubs that mostly play internally, a single thin crossover, per-player
+        activity varying several-fold, and most pairs never meeting. Style angles are
+        shuffled so they do NOT track club or rating -- otherwise every
+        well-sampled triple sits inside one half of the style circle, which is
+        provably transitive, and no 3-cycle can ever appear.
+        """
+        _r = np.random.default_rng(seed)
+        _names = [f"{_c}{_k}" for _c in "AB" for _k in range(1, n_club + 1)]
+        _n = len(_names)
+        _u = np.concatenate(
+            [np.linspace(0.9, -0.36, n_club), np.linspace(0.54, -0.9, n_club)]
+        )
+        _ang = _r.permutation(np.linspace(0, 2 * np.pi, _n, endpoint=False))
+        _L = gradient_matrix(_u) + style_matrix(_ang, np.ones(_n), lam=lam)
+
+        _G = np.zeros((_n, _n))
+        for _i in range(_n):
+            for _j in range(_i + 1, _n):
+                if (_i < n_club) == (_j < n_club):
+                    _G[_i, _j] = _G[_j, _i] = int(
+                        _r.poisson(games_per_pair * _r.uniform(0.3, 1.7))
+                    )
+        _cross = [(_i, _j) for _i in range(n_club) for _j in range(n_club, _n)]
+        _ci, _cj = _cross[int(_r.choice(len(_cross), 1)[0])]
+        _G[_ci, _cj] = _G[_cj, _ci] = max(4, int(games_per_pair * 0.4))
+
+        _W = np.zeros((_n, _n))
+        _P = sigmoid(_L)
+        for _i in range(_n):
+            for _j in range(_i + 1, _n):
+                _m = int(_G[_i, _j])
+                if _m:
+                    _wn = _r.binomial(_m, _P[_i, _j])
+                    _W[_i, _j], _W[_j, _i] = _wn, _m - _wn
+        return {"wins": _W, "games": _G, "names": _names, "L_true": _L, "lam": lam}
+
+
+    # Same generating process, two data volumes: the question is not whether style
+    # exists (it does, by construction) but whether this much data can see it.
+    league_thin = make_league(9)
+    league_deep = make_league(30)
+
+    mo.md(
+        f"""
+    Two leagues from the **same** ground truth — 14 players, two clubs, one style
+    circle at $\\lambda = 1.2$ — differing only in how much was played:
+
+    | | matches | pairs that met | median games/pair |
+    |---|---|---|---|
+    | **thin** | {int(league_thin["games"].sum() // 2)} | {int((np.triu(league_thin["games"], 1) > 0).sum())} of 91 | {int(np.median(league_thin["games"][league_thin["games"] > 0]))} |
+    | **deep** | {int(league_deep["games"].sum() // 2)} | {int((np.triu(league_deep["games"], 1) > 0).sum())} of 91 | {int(np.median(league_deep["games"][league_deep["games"] > 0]))} |
+    """
+    )
+
+    return league_deep, league_thin, make_league
+
+
+@app.cell
+def _(
+    alt,
+    count_intransitive_triples,
+    empirical_logodds,
+    expected_triples_under_scalar,
+    hodge_split,
+    holdout_comparison,
+    intransitivity_ratio,
+    league_deep,
+    league_thin,
+    match_graph_report,
+    mo,
+    np,
+    null_spectrum,
+    pl,
+    unplayed_mask,
+):
+
+    def run_checklist(league, label, min_games=3, n_rep=120, seed=3):
+        """Items 1, 2, 4, 5, 6, 7 on one league. Returns a marimo view."""
+        _W, _G, _nm = league["wins"], league["games"], league["names"]
+        _L, _ = empirical_logodds(_W, _G)
+        _rep = match_graph_report(_G, _nm)
+
+        # 1 + 2: connectivity and masking
+        _miss = unplayed_mask(_G)
+        _conn = pl.DataFrame(
+            [
+                {"check": "players", "value": str(_rep["players"])},
+                {"check": "matches", "value": str(int(_G.sum() // 2))},
+                {"check": "pairs played", "value": f'{_rep["pairs_played"]} of {_rep["pairs_possible"]}'},
+                {"check": "unplayed pairs (masked)", "value": str(int(_miss.sum() // 2))},
+                {"check": "components", "value": str(_rep["components"])},
+                {"check": "Fiedler value", "value": f'{_rep["fiedler"]:.3f}'},
+                {"check": "bridges", "value": str(_rep["bridges"]) if _rep["bridges"] else "none"},
+                {
+                    "check": "worst-determined contrast",
+                    "value": f'{_rep["worst_contrast"][0]}-{_rep["worst_contrast"][1]}'
+                    f' (R={_rep["worst_contrast"][2]:.2f})',
+                },
+            ]
+        )
+
+        # 4: how much of the flow is circulation
+        _share = intransitivity_ratio(_L)
+
+        # 5: 3-cycles against a transitive null
+        _obs_c, _tot_c = count_intransitive_triples(_W, _G, min_games)
+        _null_c = expected_triples_under_scalar(_W, _G, min_games, n_rep=n_rep, seed=seed)
+        _c95 = float(np.percentile(_null_c, 95))
+        _cyc_verdict = "clears the null" if _obs_c > _c95 else "inside the null — no evidence"
+
+        # 6: circulation spectrum against its own null
+        _u, _Gm, _C = hodge_split(_L)
+        _sv = np.linalg.svd(_C, compute_uv=False)
+        _null_s = null_spectrum(_W, _G, n_rep=min(n_rep, 120), seed=seed)
+        _floor = np.percentile(_null_s, 95, axis=0)
+        _planes = int(np.sum(_sv > _floor) // 2)
+
+        # 7: does the extra structure pay on held-out games
+        _ho = holdout_comparison(_W, _G, ranks=(0, 2), frac=0.3, seed=seed, ridge=1e-1)
+        _hl = _ho["held-out logloss"].to_list()
+        _pays = _hl[1] < _hl[0]
+
+        _spec_df = pl.DataFrame(
+            {
+                "index": list(range(1, len(_sv) + 1)) * 2,
+                "sigma": np.concatenate([_sv, _floor]).tolist(),
+                "series": ["observed σ(C)"] * len(_sv) + ["null 95th pct"] * len(_sv),
+            }
+        )
+        _chart = (
+            alt.Chart(_spec_df)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X("index:O", title="singular value index"),
+                y=alt.Y("sigma:Q", title="σ of circulation part"),
+                color=alt.Color("series:N", scale=alt.Scale(scheme="dark2")),
+                tooltip=["series", "index", alt.Tooltip("sigma", format=".3f")],
+            )
+            .properties(width=430, height=230)
+        )
+
+        return mo.vstack(
+            [
+                mo.md(f"### {label}"),
+                mo.md("**1–2. Connectivity and masking**"),
+                _conn,
+                mo.md(
+                    f"**4. Intransitivity share** = **{_share:.1%}** of squared Frobenius mass "
+                    "— but read it next to the nulls below, since estimation noise inflates it."
+                ),
+                mo.md(
+                    f"**5. 3-cycles**: observed **{_obs_c}** of {_tot_c} well-sampled triples; "
+                    f"transitive null mean {_null_c.mean():.1f}, 95th pct {_c95:.0f} → **{_cyc_verdict}**."
+                ),
+                mo.md(
+                    f"**6. Spectrum**: {_planes} plane(s) clear the null floor "
+                    f"(truth is 1, at $\\lambda$ = {league['lam']})."
+                ),
+                _chart,
+                mo.md("**7. Held-out log-loss** — the number that decides it:"),
+                _ho,
+                mo.md(
+                    f"→ **{'rank 2 pays for itself' if _pays else 'rank 2 does NOT pay — use Glicko-2'}** "
+                    f"({_hl[1]:.4f} vs {_hl[0]:.4f} for scalar)."
+                ),
+            ]
+        )
+
+
+    def _label(league, word):
+        return f"{word} league — {int(league['games'].sum() // 2)} matches"
+
+
+    mo.hstack(
+        [
+            run_checklist(league_thin, _label(league_thin, "Thin")),
+            run_checklist(league_deep, _label(league_deep, "Deep")),
+        ],
+        widths="equal",
+        gap=2,
+    )
+
+    return
+
+
+@app.cell
+def _(
+    count_intransitive_triples,
+    fit_paired_model,
+    gradient_matrix,
+    holdout_comparison,
+    logloss,
+    make_league,
+    match_graph_report,
+    np,
+    pairs_to_matrices,
+    pytest,
+    sigmoid,
+    split_games,
+    unplayed_mask,
+):
+
+    def test_pairs_to_matrices_counts_and_symmetry():
+        _W, _G, _nm = pairs_to_matrices(
+            [("ann", "bob"), ("bob", "cy"), ("cy", "ann"), ("ann", "bob")]
+        )
+        assert _nm == ["ann", "bob", "cy"]
+        assert np.allclose(_G, _G.T)                       # games symmetric
+        assert np.allclose(_W + _W.T, _G)                  # every game has one winner
+        assert _W[0, 1] == 2 and _W[1, 0] == 0             # ann beat bob twice
+        assert float(np.max(np.abs(np.diag(_G)))) == 0.0   # nobody plays themselves
+
+
+    def test_unplayed_mask_excludes_the_diagonal():
+        _G = np.array([[0.0, 3.0, 0.0], [3.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        _m = unplayed_mask(_G)
+        assert not _m.diagonal().any()                     # structural 0 is not "missing"
+        assert _m[0, 2] and _m[2, 0] and not _m[0, 1]
+
+
+    def test_split_games_conserves_every_game():
+        _W, _G, _ = pairs_to_matrices(
+            [("a", "b")] * 7 + [("b", "a")] * 5 + [("a", "c")] * 3 + [("c", "b")] * 4
+        )
+        _Wtr, _Gtr, _Wte, _Gte = split_games(_W, _G, frac=0.4, seed=0)
+        assert np.allclose(_Gtr + _Gte, _G)
+        assert np.allclose(_Wtr + _Wte, _W)
+        assert (_Gtr >= 0).all() and (_Gte >= 0).all()
+        assert np.allclose(_Wte + _Wte.T, _Gte)
+
+
+    def test_match_graph_report_finds_components_and_bridges():
+        # two triangles joined by a single edge
+        _G = np.zeros((6, 6))
+        for _i, _j in [(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5)]:
+            _G[_i, _j] = _G[_j, _i] = 5.0
+        _split = match_graph_report(_G)
+        assert _split["components"] == 2
+        assert _split["fiedler"] == pytest.approx(0.0, abs=1e-9)
+        _G[2, 3] = _G[3, 2] = 5.0
+        _joined = match_graph_report(_G)
+        assert _joined["components"] == 1
+        assert _joined["fiedler"] > 0
+        assert ("2", "3") in _joined["bridges"]            # the lone link is a bridge
+
+
+    def test_count_intransitive_triples_detects_a_rock_paper_scissors():
+        _W, _G, _ = pairs_to_matrices(
+            [("a", "b")] * 4 + [("b", "c")] * 4 + [("c", "a")] * 4
+        )
+        assert count_intransitive_triples(_W, _G, min_games=3) == (1, 1)
+        # a transitive triple is not a cycle
+        _W2, _G2, _ = pairs_to_matrices(
+            [("a", "b")] * 4 + [("b", "c")] * 4 + [("a", "c")] * 4
+        )
+        assert count_intransitive_triples(_W2, _G2, min_games=3) == (0, 1)
+
+
+    def test_logloss_is_minimised_at_the_truth():
+        _u = np.array([0.8, 0.1, -0.9])
+        _L = gradient_matrix(_u)
+        _P = sigmoid(_L)
+        _G = np.full((3, 3), 400.0)
+        np.fill_diagonal(_G, 0.0)
+        _W = _P * _G                                       # noiseless expected wins
+        _truth = logloss(_L, _W, _G)
+        for _pert in (0.4, -0.4):
+            assert logloss(gradient_matrix(_u + np.array([_pert, 0.0, 0.0])), _W, _G) > _truth
+
+
+    def test_fit_recovers_a_scalar_truth():
+        _u = np.array([1.0, 0.2, -0.4, -0.8])
+        _L = gradient_matrix(_u)
+        _G = np.full((4, 4), 4000.0)
+        np.fill_diagonal(_G, 0.0)
+        _W = sigmoid(_L) * _G
+        _fit = fit_paired_model(_W, _G, rank=0, ridge=1e-9, seed=0)
+        assert _fit["converged"]
+        assert _fit["u"] == pytest.approx(_u - _u.mean(), abs=2e-2)
+
+
+    def test_rank_two_beats_scalar_when_style_is_real_and_well_sampled():
+        _dense = make_league(60, lam=1.2, seed=11)
+        _ho = holdout_comparison(_dense["wins"], _dense["games"], ranks=(0, 2), seed=1, ridge=1e-1)
+        _hl = _ho["held-out logloss"].to_list()
+        assert _hl[1] < _hl[0]                             # the circle pays for itself
+
+
     return
 
 
