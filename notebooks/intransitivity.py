@@ -480,14 +480,25 @@ def _(mo):
        model in which all three skill pairs interact independently — Euler's theorem again.
     2. **$w$ is a blend, not a skill.** It mixes all $d$ of them, so no single skill is
        being ignored.
-    3. **The rating still uses it.** Only the matchup term is blind to $w$; $u_i$ is free
-       to depend on it. Moving a player along $w$ shifts their rating while changing *no*
-       matchup — so the dimensions balance, $3 = 1 + 2$, nothing wasted.
+    3. **Nothing forces it to be wasted.** Only the *matchup* term is blind to $w$. What
+       becomes of that component is a separate modelling choice, and this notebook does not
+       make one: $u_i$ here is a free parameter per player, never a function of skills.
 
-    So $w$ is the direction along which improving makes you **uniformly better against
-    everyone** rather than better against particular styles: pure level, zero
-    rock-paper-scissors leverage. Movement in the plane $\perp w$ is the reverse — it
-    changes *who* troubles you without changing how good you are.
+    That third point is worth stating carefully, because it is the one thing above that is
+    not a theorem. Posit a skills-to-level map $u_i = v^\top a_i$ and three cases appear,
+    decided entirely by $v^\top w$:
+
+    | | effect of sliding a player along $w$ |
+    |---|---|
+    | $v^\top w > 0$ | rating rises, **no** matchup changes — pure level, zero rock-paper-scissors leverage |
+    | $v^\top w < 0$ | rating falls, no matchup changes |
+    | $v^\top w = 0$ | nothing changes anywhere — that direction really is inert |
+
+    So "improving along $w$ makes you uniformly better against everyone" is true only in the
+    first row, and which row you are in is an assumption about $v$, not a consequence of $C$.
+    What *is* forced, for any $v$: movement along $w$ can never change a matchup, and
+    movement in the plane $\perp w$ changes *who* troubles you. Only the rating half is
+    open.
     """)
     return
 
@@ -543,6 +554,7 @@ def _(mo, np, pl):
 
     # a rating that genuinely depends on the style-blind direction
     _v = np.array([0.6, 0.3, 0.5])
+    _v_perp = _v - float(_v @ w_axis) * w_axis      # a rating map that ignores w entirely
     _a_moved = _a + 2.0 * w_axis
 
     mo.vstack(
@@ -571,15 +583,25 @@ def _(mo, np, pl):
                         "value": f"{float(_a_moved @ C_skills @ _b - _a @ C_skills @ _b):.10f}",
                     },
                     {
-                        "quantity": "move a by +2 along w: change in rating v·a",
+                        "quantity": "move a by +2 along w: rating, if v·w > 0",
                         "value": f"{float(_v @ _a_moved - _v @ _a):+.4f}",
+                    },
+                    {
+                        "quantity": "move a by +2 along w: rating, if v ⟂ w",
+                        "value": f"{float(_v_perp @ _a_moved - _v_perp @ _a):+.4f}",
+                    },
+                    {
+                        "quantity": "move a by +2 along w: rating, if v·w < 0",
+                        "value": f"{float(-_v @ _a_moved + _v @ _a):+.4f}",
                     },
                 ]
             ),
             mo.md(
-                "The matchup term is *identical* either way, and sliding a player along $w$ "
-                "moves their rating while changing no matchup at all. The $w$ direction is "
-                "not discarded — it is handed to $u$."
+                "The matchup term is *identical* either way — that part is forced. What "
+                "sliding along $w$ does to the **rating** is not: it depends entirely on the "
+                "sign of $v^\\top w$, and with $v \\perp w$ the direction is simply inert. "
+                "This notebook fits $u$ as a free parameter, so it never commits to a $v$ "
+                "at all."
             ),
         ]
     )
@@ -615,13 +637,33 @@ def _(C_skills, np, pytest, skill_space_summary, split_along_kernel, w_axis):
             assert float(_a @ C_skills @ _b) == pytest.approx(float(_pa @ C_skills @ _pb), abs=1e-12)
 
 
-    def test_moving_along_the_kernel_changes_rating_but_no_matchup():
+    def test_kernel_move_never_touches_a_matchup():
+        """Forced by C w = 0, for any player, any distance."""
         _r = np.random.default_rng(10)
         _a, _b = _r.normal(size=3), _r.normal(size=3)
-        _v = np.array([0.6, 0.3, 0.5])                            # skills -> overall level
+        for _t in (-5.0, 0.5, 100.0):
+            _moved = _a + _t * w_axis
+            assert float(_moved @ C_skills @ _b) == pytest.approx(
+                float(_a @ C_skills @ _b), abs=1e-9
+            )
+
+
+    def test_kernel_move_changes_the_rating_only_when_v_is_not_orthogonal_to_w():
+        """NOT forced: what happens to u depends on the skills->level map v, if any.
+
+        The notebook fits u as a free parameter and never commits to a v, so all
+        three of these are live possibilities rather than one being 'the' answer.
+        """
+        _r = np.random.default_rng(10)
+        _a = _r.normal(size=3)
         _moved = _a + 2.0 * w_axis
-        assert float(_moved @ C_skills @ _b) == pytest.approx(float(_a @ C_skills @ _b), abs=1e-12)
-        assert abs(float(_v @ _moved) - float(_v @ _a)) > 0.1     # the rating does move
+        _v = np.array([0.6, 0.3, 0.5])
+        _v_perp = _v - float(_v @ w_axis) * w_axis
+
+        assert float(_v @ w_axis) > 0
+        assert float(_v @ _moved) - float(_v @ _a) > 0.1          # uniformly better
+        assert float(-_v @ _moved) - float(-_v @ _a) < -0.1       # uniformly worse
+        assert float(_v_perp @ _moved) - float(_v_perp @ _a) == pytest.approx(0.0, abs=1e-12)
 
 
     def test_skill_space_lifts_to_player_space_with_the_same_rank():
