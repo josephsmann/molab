@@ -437,6 +437,207 @@ def _(mo):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### How many skills does a style circle need?
+
+    Careful — **two different matrices wear the letter $C$** in this notebook:
+
+    | | lives in | size | role |
+    |---|---|---|---|
+    | $C$ in $m(i,j) = a_i^\top C\, a_j$ | **skill space** | $d \times d$ | how skills interact |
+    | $C$ in $L = G + C$ (§4) | **player space** | $N \times N$ | the circulation flow |
+
+    Give each player $d$ skills, so $a_i \in \mathbb{R}^d$ and the skill-space $C$ is
+    $d \times d$. It has $\binom{d}{2}$ free parameters — **one per pair of skills**, which
+    is the natural guess. But pairs are not planes: since skew rank is even, that same
+    matrix has rank $\le 2\lfloor d/2 \rfloor$, so
+
+    $$d \text{ skills} \;\longrightarrow\; \binom{d}{2} \text{ parameters}, \qquad
+    \left\lfloor d/2 \right\rfloor \text{ style circles}$$
+
+    | $d$ | 2 | 3 | 4 | 5 | 6 | 7 |
+    |---|---|---|---|---|---|---|
+    | parameters | 1 | 3 | 6 | 10 | 15 | 21 |
+    | **circles** | 1 | **1** | 2 | 2 | **3** | 3 |
+
+    Three skills give three interaction parameters but only **one** circle. The three
+    skill-pair planes — power/speed, power/accuracy, speed/accuracy — are not stacked in
+    separate dimensions; they overlap, sharing axes. Three independent circles needs six
+    skills, not three.
+
+    **The kernel axis.** Odd $d$ always leaves a direction over: $C w = 0$ for some
+    $w \neq 0$. Split a player as $a_i = p_i + c_i w$ with $p_i \perp w$, and *every* cross
+    term dies at once, because $Cw = 0$ and $w^\top C = 0$ and $w^\top C w = 0$:
+
+    $$m(i,j) = p_i^\top C\, p_j$$
+
+    The matchup term never sees the $w$ component. That is not thrown-away information,
+    for three reasons:
+
+    1. **It is forced, not chosen.** No $3\times3$ skew matrix has rank 3. There is no
+       model in which all three skill pairs interact independently — Euler's theorem again.
+    2. **$w$ is a blend, not a skill.** It mixes all $d$ of them, so no single skill is
+       being ignored.
+    3. **The rating still uses it.** Only the matchup term is blind to $w$; $u_i$ is free
+       to depend on it. Moving a player along $w$ shifts their rating while changing *no*
+       matchup — so the dimensions balance, $3 = 1 + 2$, nothing wasted.
+
+    So $w$ is the direction along which improving makes you **uniformly better against
+    everyone** rather than better against particular styles: pure level, zero
+    rock-paper-scissors leverage. Movement in the plane $\perp w$ is the reverse — it
+    changes *who* troubles you without changing how good you are.
+    """)
+    return
+
+
+@app.cell
+def _(mo, np, pl):
+
+    def skill_space_summary(d_max=8, seed=0):
+        """Parameters vs independent style circles, for d skills."""
+        _r = np.random.default_rng(seed)
+        _rows = []
+        for _d in range(2, d_max + 1):
+            _M = _r.normal(size=(_d, _d))
+            _rank = np.linalg.matrix_rank(_M - _M.T)
+            _rows.append(
+                {
+                    "skills d": _d,
+                    "parameters": _d * (_d - 1) // 2,
+                    "rank": _rank,
+                    "style circles": _rank // 2,
+                    "kernel dim": _d - _rank,
+                }
+            )
+        return pl.DataFrame(_rows)
+
+
+    def kernel_axis(C):
+        """The direction a skew C annihilates, for odd-dimensional C. Returns None if trivial."""
+        _C = np.asarray(C, float)
+        _U, _S, _Vt = np.linalg.svd(_C)
+        if _S[-1] > 1e-9:
+            return None
+        return _Vt[-1]
+
+
+    def split_along_kernel(a, w):
+        """a = (component in the style plane) + (component along w)."""
+        _w = np.asarray(w, float)
+        _w = _w / np.linalg.norm(_w)
+        _c = float(np.asarray(a, float) @ _w)
+        return np.asarray(a, float) - _c * _w, _c
+
+
+    # Three skills: power, speed, accuracy. Three parameters, one circle.
+    C_skills = np.array([[0.0, 2.0, -1.0], [-2.0, 0.0, 3.0], [1.0, -3.0, 0.0]])
+    w_axis = kernel_axis(C_skills)
+    _skill_names = ["power", "speed", "accuracy"]
+
+    _ra = np.random.default_rng(4)
+    _a, _b = _ra.normal(size=3), _ra.normal(size=3)
+    _pa, _ca = split_along_kernel(_a, w_axis)
+    _pb, _cb = split_along_kernel(_b, w_axis)
+
+    # a rating that genuinely depends on the style-blind direction
+    _v = np.array([0.6, 0.3, 0.5])
+    _a_moved = _a + 2.0 * w_axis
+
+    mo.vstack(
+        [
+            mo.md("**Parameters are per skill *pair*; circles are per *plane*.**"),
+            skill_space_summary(),
+            mo.md(
+                "**The kernel axis of a 3-skill $C$** — "
+                + ", ".join(
+                    f"{_c:+.2f}·{_n}" for _c, _n in zip(np.round(w_axis, 2), _skill_names)
+                )
+                + " — a blend of all three, not one skill."
+            ),
+            pl.DataFrame(
+                [
+                    {
+                        "quantity": "m(a, b) from full skill vectors",
+                        "value": f"{float(_a @ C_skills @ _b):.10f}",
+                    },
+                    {
+                        "quantity": "m(a, b) from projections onto the plane only",
+                        "value": f"{float(_pa @ C_skills @ _pb):.10f}",
+                    },
+                    {
+                        "quantity": "move a by +2 along w: change in matchup vs b",
+                        "value": f"{float(_a_moved @ C_skills @ _b - _a @ C_skills @ _b):.10f}",
+                    },
+                    {
+                        "quantity": "move a by +2 along w: change in rating v·a",
+                        "value": f"{float(_v @ _a_moved - _v @ _a):+.4f}",
+                    },
+                ]
+            ),
+            mo.md(
+                "The matchup term is *identical* either way, and sliding a player along $w$ "
+                "moves their rating while changing no matchup at all. The $w$ direction is "
+                "not discarded — it is handed to $u$."
+            ),
+        ]
+    )
+
+    return C_skills, skill_space_summary, split_along_kernel, w_axis
+
+
+@app.cell
+def _(C_skills, np, pytest, skill_space_summary, split_along_kernel, w_axis):
+
+    def test_skill_count_gives_floor_d_over_two_circles():
+        _df = skill_space_summary(d_max=8)
+        for _row in _df.iter_rows(named=True):
+            _d = _row["skills d"]
+            assert _row["parameters"] == _d * (_d - 1) // 2       # one per skill PAIR
+            assert _row["style circles"] == _d // 2               # but only floor(d/2) planes
+            assert _row["kernel dim"] == _d % 2                   # odd d always leaves one over
+
+
+    def test_three_skills_admit_exactly_one_circle():
+        assert np.linalg.matrix_rank(C_skills) == 2               # never 3
+        assert w_axis is not None
+        assert np.allclose(C_skills @ w_axis, 0.0)
+        assert np.allclose(w_axis @ C_skills, 0.0)                # left kernel too, by skewness
+
+
+    def test_matchup_ignores_the_kernel_component():
+        _r = np.random.default_rng(9)
+        for _ in range(5):
+            _a, _b = _r.normal(size=3), _r.normal(size=3)
+            _pa, _ = split_along_kernel(_a, w_axis)
+            _pb, _ = split_along_kernel(_b, w_axis)
+            assert float(_a @ C_skills @ _b) == pytest.approx(float(_pa @ C_skills @ _pb), abs=1e-12)
+
+
+    def test_moving_along_the_kernel_changes_rating_but_no_matchup():
+        _r = np.random.default_rng(10)
+        _a, _b = _r.normal(size=3), _r.normal(size=3)
+        _v = np.array([0.6, 0.3, 0.5])                            # skills -> overall level
+        _moved = _a + 2.0 * w_axis
+        assert float(_moved @ C_skills @ _b) == pytest.approx(float(_a @ C_skills @ _b), abs=1e-12)
+        assert abs(float(_v @ _moved) - float(_v @ _a)) > 0.1     # the rating does move
+
+
+    def test_skill_space_lifts_to_player_space_with_the_same_rank():
+        # m(i,j) = a_i^T C a_j over N players is A C A^T: N x N, but rank capped by d
+        _r = np.random.default_rng(11)
+        for _d, _want in [(3, 2), (4, 4), (6, 6), (7, 6)]:
+            _A = _r.normal(size=(12, _d))
+            _M = _r.normal(size=(_d, _d))
+            _L = _A @ (_M - _M.T) @ _A.T
+            assert np.allclose(_L, -_L.T)                          # still skew in player space
+            assert np.linalg.matrix_rank(_L) == _want              # 2 * floor(d/2)
+
+
+    return
+
+
 @app.cell
 def _(np, schur):
     def skew_canonical(C, tol=1e-9):
