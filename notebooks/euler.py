@@ -64,6 +64,21 @@ def _(mo):
 
     so *every* $3\times3$ skew matrix acts by taking the cross product with one fixed
     vector. Nothing else is available to it.
+    The map runs both ways. Going back — matrix to vector — is the **vee map**, written
+    with a check instead of a hat, and it just reads the three entries off again:
+
+    $$W^\vee = \big(W_{32},\; W_{13},\; W_{21}\big), \qquad
+    \big(\hat{w}\big)^{\vee} = w, \qquad \widehat{\big(W^{\vee}\big)} = W$$
+
+    The two are **mutually inverse**: hat then vee returns the vector you started with, and
+    vee then hat returns the matrix you started with. Neither direction loses anything,
+    which is the real content — a $3$-vector and a $3\times3$ skew matrix are the same three
+    numbers in different clothes.
+
+    That is a coincidence of dimension, not a general fact. A $d \times d$ skew matrix has
+    $\binom{d}{2}$ independent entries while a vector has $d$, and $\binom{d}{2} = d$ only
+    at $d = 3$. Two dimensions have too few skew matrices to go round; four have far too
+    many. This is why the cross product exists in three dimensions and nowhere else.
 
     The axis falls out immediately. Since $w \times w = 0$,
 
@@ -115,6 +130,8 @@ def _(hat, mo, np, vee):
     _rng = np.random.default_rng(0)
     _w, _v = _rng.normal(size=3), _rng.normal(size=3)
     _W = hat(_w)
+    _S = _rng.normal(size=(3, 3))
+    _S = _S - _S.T          # an independent skew matrix, to test the other direction
 
     mo.md(
         f"""
@@ -127,7 +144,8 @@ def _(hat, mo, np, vee):
     | $\\hat{{w}}\\,w = 0$ | `{np.allclose(_W @ _w, 0)}` |
     | $\\operatorname{{rank}} \\hat{{w}} = 2$ | `{np.linalg.matrix_rank(_W) == 2}` |
     | $\\dim \\ker \\hat{{w}} = 1$ | `{3 - np.linalg.matrix_rank(_W) == 1}` |
-    | hat and vee invert each other | `{np.allclose(vee(_W), _w)}` |
+    | $(\\hat{{w}})^{{\\vee}} = w$ | `{np.allclose(vee(_W), _w)}` |
+        | $\\widehat{{(W^{{\\vee}})}} = W$, starting from a random skew $W$ | `{np.allclose(hat(vee(_S)), _S)}` |
 
     Three numbers in, three numbers out, and the vector you put in is the direction
     the matrix annihilates.
@@ -487,7 +505,10 @@ def _(
             _w, _v = _r.normal(size=3), _r.normal(size=3)
             assert np.allclose(hat(_w) @ _v, np.cross(_w, _v))
             assert np.allclose(hat(_w), -hat(_w).T)
-            assert np.allclose(vee(hat(_w)), _w)
+            assert np.allclose(vee(hat(_w)), _w)          # hat then vee
+            _M = _r.normal(size=(3, 3))
+            _S = _M - _M.T
+            assert np.allclose(hat(vee(_S)), _S)          # vee then hat -- the other side
 
     def test_generator_annihilates_its_own_vector():
         _r = np.random.default_rng(1)
